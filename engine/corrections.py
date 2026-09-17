@@ -54,6 +54,7 @@ __all__ = [
     "apply_corrections",
     "copy_corrections_to_new_goal",
     "pending_count",
+    "pending_count_by_patient",
 ]
 
 
@@ -317,6 +318,16 @@ def pending_count(engine: Engine) -> int:
     if df.empty:
         return 0
     return int(apply_corrections(df, engine)["is_pending_review"].sum())
+
+
+def pending_count_by_patient(engine: Engine) -> dict[str, int]:
+    """{pt_no: n_pending} across the whole cohort — backs Module 1's alert
+    status column."""
+    df = load_analysis_frame(engine)
+    if df.empty:
+        return {}
+    corrected = apply_corrections(df, engine)
+    return corrected.groupby("pt_no")["is_pending_review"].sum().astype(int).to_dict()
 
 
 def copy_corrections_to_new_goal(engine: Engine, *, source_goal_id: int, target_goal_id: int) -> int:

@@ -325,8 +325,17 @@ def _plan_value_or_none(text) -> Optional[str]:
 
 
 def _resolve_plan(df: pd.DataFrame, *, sheet_name: str, filename: str,
-                   warnings: list[str], source: str) -> pd.DataFrame:
+                   warnings: list[str], source: str,
+                   plan_type_override: Optional[PlanType] = None) -> pd.DataFrame:
     df = df.copy()
+    if plan_type_override is not None:
+        # The caller already knows the plan type for certain (e.g. the New
+        # Case page's dedicated Manual/Auto/Auto+Manual upload slots) — use
+        # it regardless of what the file itself claims, rather than trusting
+        # a Plan column, sheet name or filename suffix that could be wrong.
+        df["Plan"] = plan_type_override.value
+        return df
+
     if "Plan" in df.columns and df["Plan"].notna().any():
         resolved = df["Plan"].map(_plan_value_or_none)
         fallback = _plan_value_or_none(sheet_name) or _plan_value_or_none(filename)
@@ -400,7 +409,8 @@ def _resolve_patient(df: pd.DataFrame, *, sheet_name: str, filename: str,
 
 
 def _parse_goal_sheet(df: pd.DataFrame, *, sheet_name: str, filename: str,
-                       form_pt_no: Optional[str], warnings: list[str]) -> pd.DataFrame:
+                       form_pt_no: Optional[str], warnings: list[str],
+                       plan_type_override: Optional[PlanType] = None) -> pd.DataFrame:
     source = f"{filename}/{sheet_name}"
     df = _normalize_columns(df.dropna(how="all"))
     if df.empty:
@@ -409,7 +419,8 @@ def _parse_goal_sheet(df: pd.DataFrame, *, sheet_name: str, filename: str,
     base_present = _REQUIRED_BASE_COLUMNS.issubset(df.columns)
 
     if base_present and "AchievedValue" in df.columns:
-        df = _resolve_plan(df, sheet_name=sheet_name, filename=filename, warnings=warnings, source=source)
+        df = _resolve_plan(df, sheet_name=sheet_name, filename=filename, warnings=warnings,
+                           source=source, plan_type_override=plan_type_override)
     elif base_present and _is_wide_format(df):
         df = _melt_wide_format(df)
         if df.empty:
@@ -419,6 +430,13 @@ def _parse_goal_sheet(df: pd.DataFrame, *, sheet_name: str, filename: str,
             )
         warnings.append(f"{source}: combined workbook (Format B) detected — "
                         f"{df['Plan'].nunique()} plan(s)")
+        if plan_type_override is not None:
+            # A single-plan slot got a multi-plan file — trust what the file
+            # itself says (it's the only place that can know all its plans)
+            # rather than forcing everything to one type.
+            warnings.append(f"{source}: uploaded as {plan_type_override.value}, but this is a "
+                            "combined (Format B) file covering more than one plan — using each "
+                            "row's own plan type instead")
         df = _resolve_plan(df, sheet_name=sheet_name, filename=filename, warnings=warnings, source=source)
     else:
         raise UnrecognizedFileError(
@@ -519,12 +537,19 @@ def _read_workbook(name: str, content: bytes) -> dict[str, pd.DataFrame]:
 
 
 def parse_workbook(name: str, content: bytes, *, form_pt_no: Optional[str],
-                    warnings: list[str]) -> pd.DataFrame:
+                    warnings: list[str], plan_type_override: Optional[PlanType] = None) -> pd.DataFrame:
     """Parse every goal sheet in one uploaded workbook into a single long
     DataFrame (post-dedupe, with goal_key/structure_class/evaluable). A
     sheet whose layout isn't recognizable as clinical-goal data is skipped
     with a warning (e.g. an incidental notes sheet); any other problem
-    (ambiguous patient, unresolved plan type, bad Criteria value) raises."""
+    (ambiguous patient, unresolved plan type, bad Criteria value) raises.
+
+    plan_type_override: pass this when the caller already knows the plan
+    type for certain — e.g. the New Case page's dedicated Manual/Auto/
+    Auto+Manual upload slots — so a Format-A sheet's plan type is taken
+    from the slot rather than guessed from its Plan column/sheet name/
+    filename. Ignored for a Format B (combined, multi-plan) sheet.
+    """
     book = _read_workbook(name, content)
     blocks = []
     for sheet_name, sheet_df in book.items():
@@ -532,7 +557,8 @@ def parse_workbook(name: str, content: bytes, *, form_pt_no: Optional[str],
             continue
         try:
             parsed = _parse_goal_sheet(sheet_df, sheet_name=sheet_name, filename=name,
-                                       form_pt_no=form_pt_no, warnings=warnings)
+                                       form_pt_no=form_pt_no, warnings=warnings,
+                                       plan_type_override=plan_type_override)
         except UnrecognizedFileError as exc:
             warnings.append(str(exc))
             continue
@@ -612,19 +638,30 @@ def _read_file_input(f: FileInput) -> tuple[str, bytes]:
     return name, content
 
 
-def parse_case_files(files: Sequence[FileInput], form: FormInput) -> ParsedCase:
+def parse_case_files(files: Sequence[FileInput], form: FormInput, *,
+                     plan_type_overrides: Optional[Sequence[Optional[PlanType]]] = None) -> ParsedCase:
     """Parse every uploaded file for one case (Module 0 — New Case) into
     PlanFrames ready for engine.storage.save_case, applying the HN
-    safeguard across all of them."""
+    safeguard across all of them.
+
+    plan_type_overrides, when given, must be the same length as `files` —
+    each entry is the known plan type for that file (or None to fall back
+    to auto-detection), for a caller with dedicated per-plan upload slots.
+    See parse_workbook.
+    """
     if not files:
         raise ParserError("no files given")
+    if plan_type_overrides is not None and len(plan_type_overrides) != len(files):
+        raise ParserError("plan_type_overrides must be the same length as files")
 
     read = [_read_file_input(f) for f in files]
     resolved_hn, warnings = resolve_hn([name for name, _ in read], form.hn)
 
+    overrides = plan_type_overrides or [None] * len(read)
     per_file = []
-    for name, content in read:
-        df = parse_workbook(name, content, form_pt_no=form.pt_no, warnings=warnings)
+    for (name, content), override in zip(read, overrides):
+        df = parse_workbook(name, content, form_pt_no=form.pt_no, warnings=warnings,
+                            plan_type_override=override)
         sha256 = hashlib.sha256(content).hexdigest()
         per_file.append((name, sha256, df))
 

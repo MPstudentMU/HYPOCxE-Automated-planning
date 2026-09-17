@@ -36,9 +36,14 @@ If a page needs a new number, add the function to `engine/` and call it.
 
 The hospital number (HN) must never appear in any analysis table, chart, figure,
 caption, tooltip, log line, filename or export. Analysis identifies patients by
-study ID only (e.g. `Pt1`). The **only** place HN may appear is the registry,
-and there it must be masked. Before adding any column, label or export field,
-confirm it carries no HN.
+study ID only (e.g. `Pt1`). The **only** place HN may appear is the registry
+(Module 1's on-screen table and Module 9's export), and there it must be
+masked by default. Module 1 may offer an explicit unmask-behind-a-checkbox
+control for authorized on-screen viewing — never a default, never persisted
+across a session reload, and never carried into an export, chart, or any
+Module 2-5 analysis table. Module 9's export is always masked; it has no
+unmask option. Before adding any column, label or export field, confirm it
+carries no HN.
 
 ## 5. Plan types are exactly three
 

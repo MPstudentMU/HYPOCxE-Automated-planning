@@ -394,6 +394,23 @@ def test_straight_pass_copy_skips_superseded_corrections(engine_with_pending_goa
 # --------------------------------------------------------------------------- #
 
 
+def test_pending_count_by_patient():
+    engine = init_db("sqlite://")
+    save_case(engine, _form(pt_no="Pt1", hn="90000001"),
+             [PlanFrame(plan_type=PlanType.MANUAL, goals=[_goal(goal_key="k1")])])
+    save_case(engine, _form(pt_no="Pt2", hn="90000002"), [PlanFrame(plan_type=PlanType.MANUAL, goals=[
+        _goal(goal_key="k2", roi="Sigmoid", achieved_value=3200.0, status=GoalStatus.PASS, evaluable=True),
+    ])])
+
+    counts = C.pending_count_by_patient(engine)
+    assert counts == {"Pt1": 1, "Pt2": 0}
+
+
+def test_pending_count_by_patient_empty_db():
+    engine = init_db("sqlite://")
+    assert C.pending_count_by_patient(engine) == {}
+
+
 def test_pending_goals_excluded_until_resolved():
     """The contract apply_corrections provides for scoring/pass-rate (built
     in a later phase): a pending row has Priority NaN and/or Status not

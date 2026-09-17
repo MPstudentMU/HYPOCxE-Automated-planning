@@ -202,6 +202,52 @@ def test_plan_type_from_truncated_sheet_name():
 
 
 # --------------------------------------------------------------------------- #
+# plan_type_override — dedicated per-slot uploads (New Case page)
+# --------------------------------------------------------------------------- #
+
+
+def test_plan_type_override_wins_over_filename_and_sheet_name():
+    """The Auto file's own name/sheet clearly say Auto — force it into the
+    Manual slot anyway and confirm the override, not the file, wins."""
+    df = P.parse_workbook("1clinical_goals_90000001_Auto.xlsx",
+                          _fixture_bytes("1clinical_goals_90000001_Auto.xlsx"),
+                          form_pt_no=None, warnings=[], plan_type_override=PlanType.MANUAL)
+    assert set(df["Plan"]) == {"Manual"}
+
+
+def test_plan_type_override_ignored_for_format_b():
+    """A combined (Format B) file declares several plans itself — an
+    override for a single slot must not collapse them into one."""
+    warnings: list[str] = []
+    df = P.parse_workbook("6clinical_goals_90000006_combined.xlsx",
+                          _fixture_bytes("6clinical_goals_90000006_combined.xlsx"),
+                          form_pt_no=None, warnings=warnings, plan_type_override=PlanType.MANUAL)
+    assert set(df["Plan"]) == {"Manual", "Auto", "Auto+Manual"}
+    assert any("combined (Format B) file covering more than one plan" in w for w in warnings)
+
+
+def test_parse_case_files_plan_type_overrides_per_file():
+    form = FormInput(hn="90000001", pt_no="Pt1", dose_regimen=DoseRegimen.HYPO, rx_cgy=4400,
+                     fractions=20, sib_boost=False, tx_room="R1", mp1="A", mp2="B", ro="C")
+    files = [_fixture_path("1clinical_goals_90000001_Auto.xlsx"),
+            _fixture_path("1clinical_goals_90000001_Manual.xlsx")]
+    # deliberately swapped: tell the parser the Auto file is Manual and vice versa
+    parsed = P.parse_case_files(files, form,
+                                plan_type_overrides=[PlanType.MANUAL, PlanType.AUTO])
+    by_type = {pf.plan_type: pf for pf in parsed.plan_frames}
+    assert by_type[PlanType.MANUAL].source_filename == "1clinical_goals_90000001_Auto.xlsx"
+    assert by_type[PlanType.AUTO].source_filename == "1clinical_goals_90000001_Manual.xlsx"
+
+
+def test_parse_case_files_rejects_mismatched_override_length():
+    form = FormInput(hn="90000001", pt_no="Pt1", dose_regimen=DoseRegimen.HYPO, rx_cgy=4400,
+                     fractions=20, sib_boost=False, tx_room="R1", mp1="A", mp2="B", ro="C")
+    with pytest.raises(P.ParserError):
+        P.parse_case_files([_fixture_path("1clinical_goals_90000001_Manual.xlsx")], form,
+                           plan_type_overrides=[PlanType.MANUAL, PlanType.AUTO])
+
+
+# --------------------------------------------------------------------------- #
 # Pt-column disagreement in a single-plan file
 # --------------------------------------------------------------------------- #
 
