@@ -13,12 +13,20 @@ table). Per the manual's own caption: points from the same patient (one
 per plan type) aren't fully independent, so this is for exploring a trend,
 not for inference — callers should show that caveat next to the numbers,
 not just the numbers.
+
+pitman_morgan_test(): §3.7's paired-variance-equality test. This is the
+same formula engine/priority_filter.py's paired_consistency() already has
+inlined for the single aggregate Quality Index (that function is
+untouched here — it's already shipped and tested); this reusable version
+is for engine.analysis.compute_dvh_consistency(), which needs the same
+test run once per DVH metric rather than once for Quality Index.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 from scipy import stats as sps
 
@@ -27,6 +35,7 @@ from engine.schemas import GoalStatus, PlanType
 __all__ = [
     "McNemarResult", "mcnemar_test", "mcnemar_manual_vs_auto",
     "CorrelationResult", "correlation_pass_rate_vs_time",
+    "PitmanMorganResult", "pitman_morgan_test",
 ]
 
 
@@ -125,3 +134,42 @@ def correlation_pass_rate_vs_time(planning_time: pd.Series, pass_rate: pd.Series
         spearman_rho=float(spearman_rho), spearman_p=float(spearman_p),
         slope=float(fit.slope), intercept=float(fit.intercept),
     )
+
+
+@dataclass
+class PitmanMorganResult:
+    n: int
+    r: float
+    """Corr(X+Y, X-Y)."""
+    t: float
+    df: int
+    p_value: float
+
+
+def pitman_morgan_test(x: pd.Series, y: pd.Series) -> Optional[PitmanMorganResult]:
+    """Pitman-Morgan test for equality of variances in paired data
+    (docs/analysis_manual_th_v2.md §3.7): r = Corr(X+Y, X-Y),
+    t = r * sqrt(n-2) / sqrt(1-r^2), df = n-2, p = 2 * P(T > |t|). Chosen
+    over Levene's test because the data is paired (same patient, two
+    plans), which violates Levene's independence assumption.
+
+    None when there are fewer than 3 pairs (undefined), or r is undefined
+    (X+Y or X-Y is constant) or ±1 (t is a division by zero) — each a
+    real "can't test this," not a 0 or 1 masquerading as an answer.
+    """
+    paired = pd.DataFrame({"x": x, "y": y}).dropna()
+    n = len(paired)
+    if n < 3:
+        return None
+
+    s = paired["x"] + paired["y"]
+    d = paired["x"] - paired["y"]
+    if s.std() == 0 or d.std() == 0:
+        return None
+    r = float(np.corrcoef(s, d)[0, 1])
+    if abs(r) >= 1:
+        return None
+
+    t = r * np.sqrt(n - 2) / np.sqrt(1 - r ** 2)
+    p_value = 2 * sps.t.sf(abs(t), df=n - 2)
+    return PitmanMorganResult(n=n, r=r, t=float(t), df=n - 2, p_value=float(p_value))

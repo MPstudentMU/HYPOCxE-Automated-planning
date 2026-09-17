@@ -404,3 +404,208 @@ def test_pass_rate_vs_time_frame_drops_rows_missing_either_value():
     df = pd.DataFrame([dict(pt_no="Pt1", plan_type="Auto", planning_time_min=None)])
     scatter = A.pass_rate_vs_time_frame(_FakeResult(), df)
     assert scatter.empty
+
+
+# =========================================================================== #
+# compute_dvh_frame — real Pt1/Pt5 fixtures
+# =========================================================================== #
+
+
+def test_dvh_frame_dose_converted_cgy_to_gy(pt1_pt5_engine):
+    """Pt1 Manual BODY D0.0%<=4820cGy: AchievedValue 4802.6226 cGy stored
+    -> 48.026226 Gy displayed."""
+    dvh = A.compute_dvh_frame(_pipeline(pt1_pt5_engine))
+    row = dvh[(dvh.patient == "Pt1") & (dvh.plan == "Manual") & (dvh.roi == "BODY")].iloc[0]
+    assert row.unit_category == "Dose (Gy)"
+    assert row.value == pytest.approx(48.026226)
+
+
+def test_dvh_frame_volume_fraction_converted_to_percent(pt1_pt5_engine):
+    """Pt1 Manual PTV V95%Rx>=95%: AchievedValue 0.972 stored -> 97.2
+    %Volume displayed."""
+    dvh = A.compute_dvh_frame(_pipeline(pt1_pt5_engine))
+    row = dvh[(dvh.patient == "Pt1") & (dvh.plan == "Manual") & (dvh.roi == "PTV")].iloc[0]
+    assert row.unit_category == "%Volume"
+    assert row.value == pytest.approx(97.2)
+
+
+def test_dvh_frame_absolute_volume_cc_unchanged(pt1_pt5_engine):
+    """AbsoluteVolumeAtDose is already in cc — no conversion."""
+    dvh = A.compute_dvh_frame(_pipeline(pt1_pt5_engine))
+    assert "Volume (cc)" not in set(dvh["unit_category"])  # neither fixture happens to have a scorable one
+    # (Pt1/Pt5's only AbsoluteVolumeAtDose goal, zBone/Bone, has no AchievedValue — excluded, see below)
+
+
+def test_dvh_frame_excludes_rows_missing_achieved_value(pt1_pt5_engine):
+    """Bone Marrow (AbsoluteVolumeAtDose, AchievedValue missing) never
+    appears — nothing to plot."""
+    dvh = A.compute_dvh_frame(_pipeline(pt1_pt5_engine))
+    assert "Bone Marrow" not in set(dvh[dvh.patient == "Pt1"]["roi"])
+
+
+def test_dvh_frame_normalised_pct_hand_checked(pt1_pt5_engine):
+    """Pt1 Manual BODY: Achieved 4802.6226, Goal(AcceptanceLevel) 4820 ->
+    4802.6226/4820*100 = 99.639473...%."""
+    dvh = A.compute_dvh_frame(_pipeline(pt1_pt5_engine))
+    row = dvh[(dvh.patient == "Pt1") & (dvh.plan == "Manual") & (dvh.roi == "BODY")].iloc[0]
+    assert row.normalised_pct == pytest.approx(4802.6226 / 4820 * 100, abs=1e-4)
+
+
+def test_dvh_frame_straight_pass_gives_identical_values(pt1_pt5_engine):
+    """Pt1 uploaded no real Auto+Manual — straight-pass copies Auto's DVH
+    values verbatim."""
+    dvh = A.compute_dvh_frame(_pipeline(pt1_pt5_engine))
+    auto = dvh[(dvh.patient == "Pt1") & (dvh.plan == "Auto")].set_index("goal_key")["value"]
+    am = dvh[(dvh.patient == "Pt1") & (dvh.plan == "Auto+Manual")].set_index("goal_key")["value"]
+    assert auto.equals(am)
+
+
+def test_dvh_frame_one_row_per_patient_plan_goal(pt1_pt5_engine):
+    df = _pipeline(pt1_pt5_engine)
+    dvh = A.compute_dvh_frame(df)
+    assert not dvh.duplicated(subset=["patient", "plan", "goal_key"]).any()
+
+
+def test_dvh_frame_empty_df():
+    dvh = A.compute_dvh_frame(pd.DataFrame())
+    assert dvh.empty
+    assert list(dvh.columns) == ["patient", "plan", "goal_key", "roi", "structure_class",
+                                 "goal_type", "goal_text", "unit_category", "value", "normalised_pct"]
+
+
+# --------------------------------------------------------------------------- #
+# compute_dvh_frame — hand-built: zero-limit goal excluded from normalised_pct
+# --------------------------------------------------------------------------- #
+
+
+def _dvh_source_row(patient="Pt1", plan="Manual", goal_key="g1", roi="Bladder",
+                    goal_type="AbsoluteVolumeAtDose", acceptance_level=850.0,
+                    achieved_value=500.0, structure_class="OAR"):
+    return dict(pt_no=patient, plan_type=plan, goal_key=goal_key, roi=roi,
+               structure_class=structure_class, goal_type=goal_type, goal_text="goal",
+               acceptance_level=acceptance_level, achieved_value=achieved_value)
+
+
+def test_dvh_frame_zero_limit_goal_has_no_normalised_pct():
+    df = pd.DataFrame([_dvh_source_row(goal_type="VolumeAtDose", acceptance_level=0.0, achieved_value=0.0009)])
+    dvh = A.compute_dvh_frame(df)
+    assert pd.isna(dvh.iloc[0]["normalised_pct"])
+    assert dvh.iloc[0]["value"] == pytest.approx(0.09)  # 0.0009 -> 0.09 %Volume, still displayable
+
+
+def test_dvh_frame_volume_cc_category_hand_checked():
+    df = pd.DataFrame([_dvh_source_row(goal_type="AbsoluteVolumeAtDose", acceptance_level=850.0,
+                                       achieved_value=246.1468)])
+    dvh = A.compute_dvh_frame(df)
+    row = dvh.iloc[0]
+    assert row.unit_category == "Volume (cc)"
+    assert row.value == pytest.approx(246.1468)  # unchanged — already cc
+
+
+# =========================================================================== #
+# compute_dvh_consistency — hand-built frames
+# =========================================================================== #
+
+
+def _consistency_row(patient, plan, value, goal_key="g1", roi="Bladder"):
+    return dict(patient=patient, plan=plan, goal_key=goal_key, roi=roi,
+               goal_text="D0.03cc<=4725cGy", value=value)
+
+
+def test_dvh_consistency_hand_checked_sd_and_pm():
+    """Manual: [40, 44, 47, 50] (high spread); Auto: [46.0, 46.5, 46.8, 47.0]
+    (low spread) -> Auto's SD is lower, Pitman-Morgan should find a
+    significant difference in variance."""
+    rows = (
+        [_consistency_row(f"Pt{i}", "Manual", v) for i, v in enumerate([40.0, 44.0, 47.0, 50.0], 1)]
+        + [_consistency_row(f"Pt{i}", "Auto", v) for i, v in enumerate([46.0, 46.5, 46.8, 47.0], 1)]
+    )
+    dvh = pd.DataFrame(rows)
+    consistency = A.compute_dvh_consistency(dvh)
+    row = consistency.iloc[0]
+
+    assert row.n_manual == 4 and row.n_auto == 4
+    assert row.sd_manual > row.sd_auto
+    assert row.sd_lower_than_manual_auto == True  # noqa: E712
+    assert row.n_pairs_auto == 4
+    assert row.pm_p_auto is not None and not pd.isna(row.pm_p_auto)
+
+
+def test_dvh_consistency_insufficient_n_below_three():
+    """<3 patients gets flagged insufficient_n — but the task asks for
+    both "SD" and a separate "marked insufficient n," not one replacing
+    the other, so a mathematically-computable n=2 SD is still shown
+    (mean/SD need at least 2 points to exist at all; the <3 flag is a
+    caution the reader applies, not a suppression this function decides
+    for them)."""
+    rows = [_consistency_row("Pt1", "Manual", 40.0), _consistency_row("Pt2", "Manual", 44.0)]
+    dvh = pd.DataFrame(rows)
+    consistency = A.compute_dvh_consistency(dvh)
+    row = consistency.iloc[0]
+    assert row.n_manual == 2
+    assert row.insufficient_n_manual == True  # noqa: E712
+    assert row.sd_manual == pytest.approx(2.8284271247461903)  # std([40, 44], ddof=1)
+
+
+def test_dvh_consistency_sd_is_nan_at_n_equals_one():
+    """A single patient's SD is genuinely undefined (not just "insufficient")."""
+    rows = [_consistency_row("Pt1", "Manual", 40.0)]
+    dvh = pd.DataFrame(rows)
+    row = A.compute_dvh_consistency(dvh).iloc[0]
+    assert row.n_manual == 1
+    assert row.insufficient_n_manual == True  # noqa: E712
+    assert pd.isna(row.sd_manual)
+
+
+def test_dvh_consistency_n_exactly_three_is_sufficient():
+    rows = [_consistency_row(f"Pt{i}", "Manual", v) for i, v in enumerate([40.0, 44.0, 47.0], 1)]
+    dvh = pd.DataFrame(rows)
+    row = A.compute_dvh_consistency(dvh).iloc[0]
+    assert row.n_manual == 3
+    assert row.insufficient_n_manual == False  # noqa: E712
+    assert pd.notna(row.sd_manual)
+
+
+def test_dvh_consistency_pm_and_wilcoxon_none_below_three_pairs():
+    rows = [
+        _consistency_row("Pt1", "Manual", 40.0), _consistency_row("Pt2", "Manual", 44.0),
+        _consistency_row("Pt1", "Auto", 41.0), _consistency_row("Pt2", "Auto", 43.0),
+    ]
+    dvh = pd.DataFrame(rows)
+    row = A.compute_dvh_consistency(dvh).iloc[0]
+    assert row.n_pairs_auto == 2
+    assert pd.isna(row.pm_t_auto)
+    assert pd.isna(row.pm_p_auto)
+    assert row.wilcoxon_p_auto is None
+
+
+def test_dvh_consistency_sd_comparison_needs_no_pairing():
+    """sd_lower_than_manual uses each plan's own SD (n>=2 per plan) — it
+    doesn't require 3+ *paired* patients the way pm_p/wilcoxon_p do."""
+    rows = [
+        _consistency_row("Pt1", "Manual", 40.0), _consistency_row("Pt2", "Manual", 50.0),
+        _consistency_row("Pt3", "Auto", 45.0), _consistency_row("Pt4", "Auto", 45.5),
+    ]
+    dvh = pd.DataFrame(rows)
+    row = A.compute_dvh_consistency(dvh).iloc[0]
+    assert row.n_pairs_auto == 0  # no patient has both Manual and Auto
+    assert row.sd_lower_than_manual_auto == True  # noqa: E712 — still computed from each plan's own SD
+    assert pd.isna(row.pm_p_auto)  # but no paired test is possible
+
+
+def test_dvh_consistency_multiple_goals_produce_multiple_rows():
+    rows = [
+        _consistency_row("Pt1", "Manual", 40.0, goal_key="g1", roi="Bladder"),
+        _consistency_row("Pt1", "Manual", 60.0, goal_key="g2", roi="Rectum"),
+    ]
+    dvh = pd.DataFrame(rows)
+    consistency = A.compute_dvh_consistency(dvh)
+    assert len(consistency) == 2
+    assert set(consistency["goal_key"]) == {"g1", "g2"}
+
+
+def test_dvh_consistency_empty_df():
+    consistency = A.compute_dvh_consistency(pd.DataFrame())
+    assert consistency.empty
+    assert "pm_p_auto" in consistency.columns
+    assert "sd_lower_than_manual_auto_manual" in consistency.columns

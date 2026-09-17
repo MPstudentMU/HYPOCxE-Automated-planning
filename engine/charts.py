@@ -44,6 +44,22 @@ _BASE_LAYOUT = dict(
     font=dict(color="#0F2742"),
 )
 
+# docs/analysis_manual_th_v2.md §3.7's shared chart formatting rules, applied
+# to "every chart" in this module: -45° x-axis labels, automargin on both
+# axes, wide bottom margin for long rotated labels, no in-plot title (the
+# card header carries it instead — callers set that, not this dict).
+# pages/4_plan_quality.py already has its own identical local copy (`LAYOUT`)
+# predating this file; not touched here, but this is the same four values,
+# so anything built from each looks like one consistent module.
+SHARED_CHART_LAYOUT = dict(
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+    margin=dict(l=20, r=20, t=50, b=150),
+    xaxis=dict(tickangle=-45, automargin=True),
+    yaxis=dict(automargin=True),
+    font=dict(color="#0F2742"),
+)
+
 
 def cases_per_regimen_chart(registry_df: pd.DataFrame) -> go.Figure:
     """One bar per dose regimen: how many cases use it."""
@@ -297,4 +313,88 @@ def pass_rate_vs_time_scatter(scatter_df: pd.DataFrame, correlation=None) -> go.
         plot_bgcolor=_BASE_LAYOUT["plot_bgcolor"], paper_bgcolor=_BASE_LAYOUT["paper_bgcolor"],
         font=_BASE_LAYOUT["font"],
     )
+    return fig
+
+
+# --------------------------------------------------------------------------- #
+# Module 3 — DVH Comparison (§3.7)
+# --------------------------------------------------------------------------- #
+
+
+def _wrap_axis_label(roi: str, goal_text: str, max_len: int = 16) -> str:
+    """§3.7's shared rule: a long label is line-broken between the
+    structure name and the metric, each side truncated at 16 characters."""
+    roi_part = roi if len(roi) <= max_len else roi[:max_len]
+    goal_part = goal_text if len(goal_text) <= max_len else goal_text[:max_len]
+    return f"{roi_part}<br>{goal_part}"
+
+
+def dvh_boxplot(dvh_frame: pd.DataFrame, *, value_col: str = "value", unit_label: str = "") -> go.Figure:
+    """One box per (goal, plan) — grouped by goal on the x-axis, colored
+    by plan, boxmean='sd', every point shown and jittered. Call this with
+    rows from a single unit_category only (or all-Normalised rows, which
+    share a comparable scale by construction) — engine.analysis
+    .compute_dvh_frame keeps unit_category distinct precisely so nothing
+    here has to guess whether mixing is safe.
+    """
+    if dvh_frame.empty:
+        return go.Figure()
+
+    labels = {
+        goal_key: _wrap_axis_label(g["roi"].iloc[0], g["goal_text"].iloc[0])
+        for goal_key, g in dvh_frame.groupby("goal_key")
+    }
+
+    fig = go.Figure()
+    for plan_type in PLAN_ORDER:
+        plan_df = dvh_frame[dvh_frame["plan"] == plan_type]
+        if plan_df.empty:
+            continue
+        fig.add_trace(go.Box(
+            x=plan_df["goal_key"].map(labels), y=plan_df[value_col], name=plan_type,
+            marker_color=PLAN_COLORS[plan_type], boxmean="sd", boxpoints="all",
+            jitter=0.4, pointpos=0, text=plan_df["patient"],
+            hovertemplate="%{text}: %{y:.2f}<extra></extra>",
+        ))
+
+    fig.update_layout(boxmode="group", yaxis_title=unit_label, **SHARED_CHART_LAYOUT)
+    return fig
+
+
+def quality_index_spread_chart(qi_table: pd.DataFrame, cohort_table: pd.DataFrame) -> go.Figure:
+    """One Quality Index boxplot per plan type, each labeled with its own
+    SD on the x-axis — §3.7's "Quality-index Spread Boxplot". qi_table /
+    cohort_table are engine.priority_filter.quality_index_table() /
+    cohort_summary()'s own output; this only draws what they computed.
+    """
+    fig = go.Figure()
+    for _, row in cohort_table.iterrows():
+        plan = row["plan"]
+        vals = qi_table.loc[qi_table["plan"] == plan, "quality_index"].dropna()
+        sd_label = "—" if pd.isna(row["sd"]) else f"{row['sd']:.1f}"
+        fig.add_trace(go.Box(
+            y=vals, name=f"{plan}<br>SD = {sd_label}", boxpoints="all",
+            jitter=0.3, pointpos=0, marker_color=PLAN_COLORS.get(plan, PRIMARY), boxmean="sd",
+        ))
+    fig.update_layout(showlegend=False, yaxis_title="Quality Index (%)", **SHARED_CHART_LAYOUT)
+    return fig
+
+
+def structure_group_radar_chart(radar_table_df: pd.DataFrame) -> go.Figure:
+    """Mean base score (-2..+3) by structure group, one overlay per plan
+    — §3.7's Radar Chart. radar_table_df is
+    engine.priority_filter.radar_table()'s own output.
+    """
+    fig = go.Figure()
+    for plan_type in PLAN_ORDER:
+        sub = radar_table_df[radar_table_df["plan"] == plan_type]
+        if sub.empty:
+            continue
+        theta = sub["structure_group"].tolist()
+        r = sub["mean_base"].tolist()
+        fig.add_trace(go.Scatterpolar(
+            r=r + r[:1], theta=theta + theta[:1], name=plan_type,
+            line_color=PLAN_COLORS[plan_type], fill="toself", opacity=0.45,
+        ))
+    fig.update_layout(polar=dict(radialaxis=dict(range=[-2, 3])), margin=dict(l=40, r=40, t=50, b=40))
     return fig

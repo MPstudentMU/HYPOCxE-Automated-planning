@@ -191,3 +191,59 @@ def test_correlation_none_when_x_is_constant():
 
 def test_correlation_empty_series():
     assert S.correlation_pass_rate_vs_time(pd.Series(dtype=float), pd.Series(dtype=float)) is None
+
+
+# --------------------------------------------------------------------------- #
+# pitman_morgan_test — hand-computed via S=X+Y, D=X-Y arithmetic
+# --------------------------------------------------------------------------- #
+
+
+def test_pitman_morgan_hand_computed_r_zero():
+    """X=[1,2,3,4], Y=[2,1,4,3] -> S=[3,3,7,7], D=[-1,1,-1,1]. S-mean(S) =
+    [-2,-2,2,2]; sum((S-mean)*D) = 2-2-2+2 = 0 -> Cov(S,D) = 0 -> r = 0
+    exactly -> t = 0 -> p = 2*P(T>0) = 1.0 exactly (t-distribution is
+    symmetric about 0 for any df)."""
+    x = pd.Series([1.0, 2.0, 3.0, 4.0])
+    y = pd.Series([2.0, 1.0, 4.0, 3.0])
+    result = S.pitman_morgan_test(x, y)
+    assert result is not None
+    assert result.n == 4
+    assert result.r == pytest.approx(0.0, abs=1e-12)
+    assert result.t == pytest.approx(0.0, abs=1e-12)
+    assert result.df == 2
+    assert result.p_value == pytest.approx(1.0)
+
+
+def test_pitman_morgan_none_when_sum_is_constant():
+    """X=[1..5], Y=[5..1] (mirror image) -> S=X+Y is constant (6 for every
+    pair) -> r undefined."""
+    x = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+    y = pd.Series([5.0, 4.0, 3.0, 2.0, 1.0])
+    assert S.pitman_morgan_test(x, y) is None
+
+
+def test_pitman_morgan_none_when_perfectly_correlated():
+    """X=[2,4,6], Y=[1,2,3] -> S=[3,6,9], D=[1,2,3] = S/3 exactly -> r=1
+    -> t is a division by zero."""
+    x = pd.Series([2.0, 4.0, 6.0])
+    y = pd.Series([1.0, 2.0, 3.0])
+    assert S.pitman_morgan_test(x, y) is None
+
+
+def test_pitman_morgan_none_below_three_pairs():
+    assert S.pitman_morgan_test(pd.Series([1.0, 2.0]), pd.Series([1.0, 3.0])) is None
+
+
+def test_pitman_morgan_drops_unpaired_nan_rows():
+    x = pd.Series([1.0, 2.0, 3.0, 4.0, None])
+    y = pd.Series([2.0, 1.0, 4.0, 3.0, 99.0])
+    result = S.pitman_morgan_test(x, y)
+    assert result.n == 4  # the row with a missing x is dropped entirely
+
+
+def test_pitman_morgan_symmetric_p_value_swapping_x_and_y():
+    x = pd.Series([1.0, 5.0, 2.0, 8.0, 3.0])
+    y = pd.Series([2.0, 3.0, 6.0, 1.0, 9.0])
+    a = S.pitman_morgan_test(x, y)
+    b = S.pitman_morgan_test(y, x)
+    assert a.p_value == pytest.approx(b.p_value)

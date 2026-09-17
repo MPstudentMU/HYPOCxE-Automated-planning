@@ -36,6 +36,19 @@ live there). pages/4_plan_quality.py's ADAPTER section was written against
 either existed; re-exporting satisfies that without duplicating the
 implementation or moving it out of what's otherwise a clean split (goal-
 level scoring vs. cohort-level analysis).
+
+compute_dvh_frame() — Module 3's DVH Consistency boxplot (§3.7): one row
+per (patient, plan, goal), the achieved value converted to its natural
+display unit (Dose in Gy, %Volume, or Volume in cc — never mixed on one
+axis) plus an always-available Normalised (% of Goal) value. Independent
+of priority filtering — it's a descriptive summary of raw DVH values, not
+a scored metric.
+
+compute_dvh_consistency() — one row per goal: n/mean/SD/CV per plan (an
+n < 3 cell is marked insufficient_n rather than shown with a misleading
+SD), and, for Auto and Auto+Manual each vs Manual, whether that plan's SD
+is lower and the paired engine.stats.pitman_morgan_test /
+Wilcoxon signed-rank results (both None below 3 paired patients).
 """
 from __future__ import annotations
 
@@ -44,15 +57,18 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from scipy import stats as sps
 
 from engine.schemas import GoalStatus, PlanType
 from engine.scoring import compute_critical_alerts, compute_goal_scores  # noqa: F401  (re-export)
+from engine.stats import pitman_morgan_test
 
 __all__ = [
     "PassRateResult", "PASS_RATE_TARGETS", "compute_pass_rate",
     "TimeEfficiencyResult", "EFFICIENCY_BAND_RANGE", "efficiency_band", "compute_time_efficiency",
     "pass_rate_vs_time_frame",
     "compute_goal_scores", "compute_critical_alerts",  # re-exported from engine.scoring
+    "DVH_UNIT_CATEGORIES", "compute_dvh_frame", "compute_dvh_consistency",
 ]
 
 # Targets from docs/analysis_manual_th_v2.md, Module 1's table — Manual is
@@ -319,3 +335,152 @@ def pass_rate_vs_time_frame(pass_rate_result: PassRateResult, df: pd.DataFrame) 
         times, on=["pt_no", "plan_type"], how="left"
     )
     return merged.dropna(subset=["pass_rate", "planning_time_min"]).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# compute_dvh_frame — Module 3's DVH Consistency boxplot (§3.7)
+# --------------------------------------------------------------------------- #
+
+# GoalType -> the unit its AchievedValue is naturally in and the display
+# category it belongs to. A dose is stored in cGy but displayed in Gy (the
+# manual's own unit choice); a VolumeAtDose fraction (0-1) is displayed as a
+# percent; AbsoluteVolumeAtDose is already cc, no conversion needed. Kept
+# local (not reused from engine.corrections.GOAL_TYPE_UNITS) because that
+# table's "cGy"/"%" labels are storage units for correction-entry, not the
+# Gy-scaled display categories the manual's boxplot selector names.
+DVH_UNIT_CATEGORIES: dict[str, tuple[str, float]] = {
+    "DoseAtVolume": ("Dose (Gy)", 1.0 / 100.0),
+    "DoseAtAbsoluteVolume": ("Dose (Gy)", 1.0 / 100.0),
+    "AverageDose": ("Dose (Gy)", 1.0 / 100.0),
+    "AbsoluteVolumeAtDose": ("Volume (cc)", 1.0),
+    "VolumeAtDose": ("%Volume", 100.0),
+}
+
+
+def compute_dvh_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per (patient, plan, goal) with achieved_value converted to
+    its display unit. df must already be the corrected, straight-pass-
+    imputed analysis frame (engine.corrections.apply_corrections then
+    engine.imputation.apply_straight_pass — same precondition as every
+    other compute_* function in this module) so a straight-pass patient's
+    imputed Auto+Manual rows are included in the aggregate just like a
+    real upload would be.
+
+    Columns: patient, plan, goal_key, roi, structure_class, goal_type,
+    goal_text, unit_category ("Dose (Gy)" | "%Volume" | "Volume (cc)"),
+    value (in unit_category's unit), normalised_pct (achieved / goal *
+    100 — always computable except for a zero-limit goal, where Goal = 0
+    makes it undefined, or a missing achieved value).
+
+    A row with no AchievedValue is dropped — there's nothing to plot for
+    it; unlike compute_pass_rate/compute_goal_scores this doesn't filter
+    on priority or "scorable" at all, since it's describing the raw DVH
+    distribution, not a scored quality metric.
+    """
+    columns = ["patient", "plan", "goal_key", "roi", "structure_class", "goal_type",
+              "goal_text", "unit_category", "value", "normalised_pct"]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    have_value = df[df["achieved_value"].notna()].copy()
+    if have_value.empty:
+        return pd.DataFrame(columns=columns)
+
+    unit_info = have_value["goal_type"].map(DVH_UNIT_CATEGORIES)
+    have_value = have_value[unit_info.notna()].copy()
+    if have_value.empty:
+        return pd.DataFrame(columns=columns)
+    unit_info = have_value["goal_type"].map(DVH_UNIT_CATEGORIES)
+    have_value["unit_category"] = unit_info.map(lambda t: t[0])
+    have_value["value"] = have_value["achieved_value"] * unit_info.map(lambda t: t[1])
+
+    normalisable = have_value["acceptance_level"] != 0
+    have_value["normalised_pct"] = np.where(
+        normalisable, have_value["achieved_value"] / have_value["acceptance_level"] * 100.0, np.nan
+    )
+
+    out = have_value.rename(columns={"pt_no": "patient", "plan_type": "plan"})[columns]
+    return out.reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# compute_dvh_consistency — §3.7's per-metric consistency table
+# --------------------------------------------------------------------------- #
+
+_DVH_PLAN_SLUG = {PlanType.MANUAL.value: "manual", PlanType.AUTO.value: "auto",
+                  PlanType.AUTO_MANUAL.value: "auto_manual"}
+_DVH_COMPARISON_PLANS = [PlanType.AUTO.value, PlanType.AUTO_MANUAL.value]
+
+
+def _plan_descriptives(values: pd.Series) -> dict:
+    n = int(values.notna().sum())
+    vals = values.dropna()
+    mean = vals.mean() if n else np.nan
+    sd = vals.std(ddof=1) if n >= 2 else np.nan
+    cv = (sd / abs(mean) * 100.0) if (n >= 2 and pd.notna(mean) and mean != 0 and pd.notna(sd)) else np.nan
+    return dict(n=n, mean=mean, sd=sd, cv=cv, insufficient_n=n < 3)
+
+
+def compute_dvh_consistency(dvh_frame: pd.DataFrame, *, value_col: str = "value") -> pd.DataFrame:
+    """One row per goal_key: n/mean/sd/cv per plan (insufficient_n=True,
+    sd=NaN when that plan has fewer than 3 patients for this goal — an
+    honest "not enough data," never a misleading number), plus for Auto
+    and Auto+Manual each vs Manual: sd_lower_than_manual, and the paired
+    engine.stats.pitman_morgan_test / Wilcoxon signed-rank p-value (both
+    None below 3 paired patients, or when the paired test is otherwise
+    undefined — see pitman_morgan_test).
+
+    `value_col` selects which of compute_dvh_frame()'s value columns to
+    summarize — "value" (the goal's own display unit) or "normalised_pct".
+    Pass compute_dvh_frame() output already filtered to one unit_category
+    (or leave unfiltered when value_col="normalised_pct", since that
+    column is unit-agnostic by construction).
+    """
+    base_columns = ["goal_key", "roi", "goal_text"]
+    plan_columns = [f"{stat}_{slug}" for slug in _DVH_PLAN_SLUG.values()
+                    for stat in ("n", "mean", "sd", "cv", "insufficient_n")]
+    comparison_columns = [f"{stat}_{_DVH_PLAN_SLUG[p]}" for p in _DVH_COMPARISON_PLANS
+                          for stat in ("n_pairs", "sd_lower_than_manual", "pm_t", "pm_p", "wilcoxon_p")]
+    columns = base_columns + plan_columns + comparison_columns
+    if dvh_frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for goal_key, g in dvh_frame.groupby("goal_key", sort=False):
+        row = dict(goal_key=goal_key, roi=g["roi"].iloc[0], goal_text=g["goal_text"].iloc[0])
+
+        plan_stats = {}
+        for plan_type, slug in _DVH_PLAN_SLUG.items():
+            stats_ = _plan_descriptives(g.loc[g["plan"] == plan_type, value_col])
+            plan_stats[plan_type] = stats_
+            for stat_name, stat_value in stats_.items():
+                row[f"{stat_name}_{slug}"] = stat_value
+
+        manual_vals = g.loc[g["plan"] == PlanType.MANUAL.value, ["patient", value_col]].dropna()
+        for plan_type in _DVH_COMPARISON_PLANS:
+            slug = _DVH_PLAN_SLUG[plan_type]
+            plan_vals = g.loc[g["plan"] == plan_type, ["patient", value_col]].dropna()
+            paired = manual_vals.merge(plan_vals, on="patient", suffixes=("_manual", "_plan"))
+            n_pairs = len(paired)
+
+            sd_manual, sd_plan = plan_stats[PlanType.MANUAL.value]["sd"], plan_stats[plan_type]["sd"]
+            sd_lower = (sd_plan < sd_manual) if (pd.notna(sd_manual) and pd.notna(sd_plan)) else None
+
+            pm = wilcoxon_p = None
+            if n_pairs >= 3:
+                pm = pitman_morgan_test(paired[f"{value_col}_plan"], paired[f"{value_col}_manual"])
+                diffs = paired[f"{value_col}_plan"] - paired[f"{value_col}_manual"]
+                if (diffs != 0).any():
+                    wilcoxon_p = float(sps.wilcoxon(paired[f"{value_col}_plan"],
+                                                    paired[f"{value_col}_manual"],
+                                                    zero_method="zsplit").pvalue)
+
+            row[f"n_pairs_{slug}"] = n_pairs
+            row[f"sd_lower_than_manual_{slug}"] = sd_lower
+            row[f"pm_t_{slug}"] = pm.t if pm else np.nan
+            row[f"pm_p_{slug}"] = pm.p_value if pm else np.nan
+            row[f"wilcoxon_p_{slug}"] = wilcoxon_p
+
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=columns)
