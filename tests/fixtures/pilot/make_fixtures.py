@@ -42,7 +42,11 @@ pt1_manual = [
     row(1, 1, "Bladder", "D0.03cc <= 4725 cGy", "DoseAtAbsoluteVolume", "AtMost", 4725.0, 0.03, 4715.2563, "PASS", "Manual"),
     row(1, 1, "zBone", "V500cGy <= 850.00 cc", "AbsoluteVolumeAtDose", "AtMost", 850.0, 500.0, None, "FAIL", "Manual"),
     row(1, 2, "Kidney_L", "Dmean <= 1500 cGy", "AverageDose", "AtMost", 1500.0, 0.0, 1382.1, "PASS", "Manual"),
-    row(1, 1, "PTV45", "V95%Rx >= 95.0%", "VolumeAtDose", "AtLeast", 95.0, 95.0, 97.2, "PASS", "Manual"),
+    # AcceptanceLevel/AchievedValue are volume *fractions* for VolumeAtDose
+    # goals (0.95 = 95%, matching real RayStation exports — see
+    # engine/parser.py's module docstring); ParameterValue is the dose
+    # being queried, here 95% of Pt1's Hypo Rx (4400 cGy) = 4180 cGy.
+    row(1, 1, "PTV45", "V95%Rx >= 95.0%", "VolumeAtDose", "AtLeast", 0.95, 4180.0, 0.972, "PASS", "Manual"),
     row(1, 2147483647, "Rectum_new", "Dmean <= 3000 cGy", "AverageDose", "AtMost", 3000.0, 0.0, 2890.4, "PASS", "Manual"),
 ]
 df = pd.DataFrame(pt1_manual, columns=COLS)
@@ -61,8 +65,10 @@ pt1_auto_rows = [
     dict(**{" Priority ": 1, "ROI": "Bladder", " Goal": "D0.03cc <= 4725 cGy", "GoalType": "DoseAtAbsoluteVolume",
             "Criteria": "AtMost", "AcceptanceLevel": 4725.0, "ParameterValue": 0.03,
             "AchievedValue": 4710.0, "Status": "PASS"}),
+    # DoseAtVolume: AcceptanceLevel/AchievedValue are doses (cGy);
+    # ParameterValue is the volume *fraction* being queried (0.95 = 95%).
     dict(**{" Priority ": 3, "ROI": "1 ITV45", " Goal": "D95.0% >= 4500 cGy", "GoalType": "DoseAtVolume",
-            "Criteria": "AtLeast", "AcceptanceLevel": 4500.0, "ParameterValue": 95.0,
+            "Criteria": "AtLeast", "AcceptanceLevel": 4500.0, "ParameterValue": 0.95,
             "AchievedValue": 4550.2, "Status": "PASS"}),
 ]
 df = pd.DataFrame(pt1_auto_rows)
