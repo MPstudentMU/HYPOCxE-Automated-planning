@@ -12,20 +12,37 @@ all of a patient's plans ("Matched goals only", default off). Every
 excluded/non-evaluable count is reported alongside the rate — never
 folded in silently.
 
-Expected pipeline before this: engine.storage.load_analysis_frame ->
+compute_time_efficiency() — the manual's own Module 2 (this app's page,
+Module 3 "Time Efficiency"):
+
+    % Time Efficiency (plan) = (T_manual − T_plan) / T_manual × 100
+
+for plan in {Auto, Auto+Manual}; None if either time is missing (not 0 —
+a genuine "can't compute this", not a 0% claim). Banded per §Module 2's
+table: <40% Below, 40-75% Target, >75% Exceeds. A straight-pass patient
+(engine.imputation.apply_straight_pass already copied Auto's
+planning_time_min onto Auto+Manual) gets identical times for both, so
+identical efficiency, for free — no special-casing needed here.
+
+Expected pipeline before either: engine.storage.load_analysis_frame ->
 engine.corrections.apply_corrections -> engine.imputation.apply_straight_pass
--> compute_pass_rate.
+-> compute_pass_rate / compute_time_efficiency.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from engine.schemas import GoalStatus, PlanType
 
-__all__ = ["PassRateResult", "PASS_RATE_TARGETS", "compute_pass_rate"]
+__all__ = [
+    "PassRateResult", "PASS_RATE_TARGETS", "compute_pass_rate",
+    "TimeEfficiencyResult", "EFFICIENCY_BAND_RANGE", "efficiency_band", "compute_time_efficiency",
+    "pass_rate_vs_time_frame",
+]
 
 # Targets from docs/analysis_manual_th_v2.md, Module 1's table — Manual is
 # the reference group and has no target of its own.
@@ -167,3 +184,127 @@ def _cohort_summary(per_patient: pd.DataFrame) -> pd.DataFrame:
                          cv=cv, target=target, n_patients=len(g), n_target_met=n_target_met,
                          target_met_pct=target_met_pct))
     return pd.DataFrame(rows, columns=columns)
+
+
+# --------------------------------------------------------------------------- #
+# compute_time_efficiency
+# --------------------------------------------------------------------------- #
+
+# docs/analysis_manual_th_v2.md, Module 2's Efficiency Band table.
+EFFICIENCY_BAND_RANGE = (40.0, 75.0)
+
+
+@dataclass
+class TimeEfficiencyResult:
+    per_patient: pd.DataFrame
+    """One row per pt_no: time_manual/time_auto/time_auto_manual (minutes),
+    pct_eff_auto/pct_eff_auto_manual (None if either time involved is
+    missing), and band_auto/band_auto_manual ("Below"/"Target"/"Exceeds",
+    None alongside a None efficiency)."""
+
+    cohort: pd.DataFrame
+    """One row per plan_type (Auto, Auto+Manual): n (patients with a
+    defined %efficiency), mean, sd, and n_below/n_target/n_exceeds."""
+
+
+def efficiency_band(pct_eff: Optional[float]) -> Optional[str]:
+    """"Below" / "Target" / "Exceeds" per the manual's table (40-75%
+    inclusive is Target); None if pct_eff itself is None/NaN.
+
+    Note for callers reading a band back out of a DataFrame column (as
+    TimeEfficiencyResult.per_patient's band_auto/band_auto_manual are):
+    once this None sits in a pandas column alongside other rows' band
+    strings, pandas' string dtype coerces it to NaN — check with
+    pd.isna(), not `is None`.
+    """
+    if pct_eff is None or pd.isna(pct_eff):
+        return None
+    low, high = EFFICIENCY_BAND_RANGE
+    if pct_eff < low:
+        return "Below"
+    if pct_eff <= high:
+        return "Target"
+    return "Exceeds"
+
+
+def _pct_efficiency(time_manual: Optional[float], time_plan: Optional[float]) -> Optional[float]:
+    if pd.isna(time_manual) or pd.isna(time_plan) or time_manual == 0:
+        return None
+    return (time_manual - time_plan) / time_manual * 100.0
+
+
+def compute_time_efficiency(df: pd.DataFrame) -> TimeEfficiencyResult:
+    """df is the (corrected, straight-pass-imputed) analysis frame — same
+    input as compute_pass_rate. planning_time_min is a per-plan value (one
+    per patient×plan_type, repeated across that plan's goal rows), so this
+    only needs the distinct combinations, not every goal row."""
+    empty_per_patient = pd.DataFrame(columns=[
+        "pt_no", "time_manual", "time_auto", "time_auto_manual",
+        "pct_eff_auto", "pct_eff_auto_manual", "band_auto", "band_auto_manual",
+    ])
+    if df.empty:
+        return TimeEfficiencyResult(per_patient=empty_per_patient,
+                                    cohort=_time_efficiency_cohort(empty_per_patient))
+
+    times = df[["pt_no", "plan_type", "planning_time_min"]].drop_duplicates()
+    wide = times.pivot(index="pt_no", columns="plan_type", values="planning_time_min")
+    wide = wide.reindex(columns=_PLAN_ORDER)
+
+    rows = []
+    for pt_no, row in wide.iterrows():
+        t_manual = row.get(PlanType.MANUAL.value)
+        t_auto = row.get(PlanType.AUTO.value)
+        t_am = row.get(PlanType.AUTO_MANUAL.value)
+
+        pct_auto = _pct_efficiency(t_manual, t_auto)
+        pct_am = _pct_efficiency(t_manual, t_am)
+
+        rows.append(dict(
+            pt_no=pt_no, time_manual=t_manual, time_auto=t_auto, time_auto_manual=t_am,
+            pct_eff_auto=pct_auto, pct_eff_auto_manual=pct_am,
+            band_auto=efficiency_band(pct_auto), band_auto_manual=efficiency_band(pct_am),
+        ))
+
+    per_patient = pd.DataFrame(rows)
+    return TimeEfficiencyResult(per_patient=per_patient, cohort=_time_efficiency_cohort(per_patient))
+
+
+def _time_efficiency_cohort(per_patient: pd.DataFrame) -> pd.DataFrame:
+    columns = ["plan_type", "n", "mean", "sd", "n_below", "n_target", "n_exceeds"]
+    if per_patient.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for plan_type, pct_col, band_col in [
+        (PlanType.AUTO.value, "pct_eff_auto", "band_auto"),
+        (PlanType.AUTO_MANUAL.value, "pct_eff_auto_manual", "band_auto_manual"),
+    ]:
+        rates = per_patient[pct_col].dropna()
+        n = len(rates)
+        mean = rates.mean() if n else np.nan
+        sd = rates.std(ddof=1) if n else np.nan
+        n_below = int((per_patient[band_col] == "Below").sum())
+        n_target = int((per_patient[band_col] == "Target").sum())
+        n_exceeds = int((per_patient[band_col] == "Exceeds").sum())
+        rows.append(dict(plan_type=plan_type, n=n, mean=mean, sd=sd,
+                         n_below=n_below, n_target=n_target, n_exceeds=n_exceeds))
+    return pd.DataFrame(rows, columns=columns)
+
+
+# --------------------------------------------------------------------------- #
+# %Pass Rate vs Planning Time — the data behind Module 3's scatter plot
+# --------------------------------------------------------------------------- #
+
+
+def pass_rate_vs_time_frame(pass_rate_result: PassRateResult, df: pd.DataFrame) -> pd.DataFrame:
+    """One row per (pt_no, plan_type) with pass_rate and planning_time_min
+    — every plan type, Manual included, per the manual's "colored/shaped
+    by plan type" scatter spec. `df` is the same (corrected, imputed)
+    analysis frame passed to compute_pass_rate/compute_time_efficiency.
+    Rows missing either value are dropped (nothing to plot for them).
+    """
+    times = df[["pt_no", "plan_type", "planning_time_min"]].drop_duplicates()
+    merged = pass_rate_result.per_patient[["pt_no", "plan_type", "pass_rate"]].merge(
+        times, on=["pt_no", "plan_type"], how="left"
+    )
+    return merged.dropna(subset=["pass_rate", "planning_time_min"]).reset_index(drop=True)

@@ -14,11 +14,12 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 
-from engine.analysis import PASS_RATE_TARGETS
+from engine.analysis import EFFICIENCY_BAND_RANGE, PASS_RATE_TARGETS
 from engine.schemas import PlanType
 
 PRIMARY = "#1F5FAE"
 GRID = "#DCE5F0"  # matches the app's existing hairline/border color
+AMBER = "#F2A33A"  # target-band highlight color, used across Module 2 and 3
 
 # The plan-type color coding used throughout the platform (docs/
 # analysis_manual_th_v2.md, Module 1's own color spec).
@@ -151,5 +152,149 @@ def pass_rate_mean_sd_chart(cohort_df: pd.DataFrame) -> go.Figure:
         yaxis=dict(title="% Pass Rate", showgrid=True, gridcolor=GRID, rangemode="tozero"),
         showlegend=False,
         **_BASE_LAYOUT,
+    )
+    return fig
+
+
+# --------------------------------------------------------------------------- #
+# Module 3 — Time Efficiency
+# --------------------------------------------------------------------------- #
+
+_LEGEND_BELOW = dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
+_MARGIN_WITH_BOTTOM_LEGEND = dict(l=10, r=10, t=40, b=50)
+
+
+def planning_time_bar_chart(per_patient_df: pd.DataFrame) -> go.Figure:
+    """One grouped bar per patient — Manual/Auto/Auto+Manual planning time
+    in minutes. An Auto or Auto+Manual bar whose %efficiency lands in the
+    40-75% Target band gets an amber outline and a "↓NN%" label — the
+    manual's own example format."""
+    fig = go.Figure()
+    patients = per_patient_df["pt_no"].tolist()
+
+    fig.add_trace(go.Bar(
+        name=PlanType.MANUAL.value, x=patients, y=per_patient_df["time_manual"].tolist(),
+        marker_color=PLAN_COLORS[PlanType.MANUAL.value],
+        hovertemplate=f"{PlanType.MANUAL.value}: " + "%{y:.1f} min<extra></extra>",
+    ))
+
+    for plan_type, time_col, pct_col, band_col in [
+        (PlanType.AUTO.value, "time_auto", "pct_eff_auto", "band_auto"),
+        (PlanType.AUTO_MANUAL.value, "time_auto_manual", "pct_eff_auto_manual", "band_auto_manual"),
+    ]:
+        in_target = [b == "Target" for b in per_patient_df[band_col]]
+        line_colors = [AMBER if t else "rgba(0,0,0,0)" for t in in_target]
+        line_widths = [2.5 if t else 0 for t in in_target]
+        labels = [f"↓{p:.0f}%" if t and pd.notna(p) else ""
+                 for t, p in zip(in_target, per_patient_df[pct_col])]
+        fig.add_trace(go.Bar(
+            name=plan_type, x=patients, y=per_patient_df[time_col].tolist(),
+            marker=dict(color=PLAN_COLORS[plan_type], line=dict(color=line_colors, width=line_widths)),
+            text=labels, textposition="outside",
+            hovertemplate=f"{plan_type}: " + "%{y:.1f} min<extra></extra>",
+        ))
+
+    fig.update_layout(
+        title="Planning time per patient",
+        barmode="group",
+        xaxis=dict(title=None, showgrid=False),
+        yaxis=dict(title="Minutes", showgrid=True, gridcolor=GRID, rangemode="tozero"),
+        legend=_LEGEND_BELOW,
+        margin=_MARGIN_WITH_BOTTOM_LEGEND,
+        plot_bgcolor=_BASE_LAYOUT["plot_bgcolor"], paper_bgcolor=_BASE_LAYOUT["paper_bgcolor"],
+        font=_BASE_LAYOUT["font"],
+    )
+    return fig
+
+
+def time_efficiency_bar_chart(per_patient_df: pd.DataFrame) -> go.Figure:
+    """%Time Efficiency per patient for Auto and Auto+Manual (Manual has
+    none — it's the baseline the other two are measured against), with
+    the 40-75% Target band shaded as a background rectangle."""
+    fig = go.Figure()
+    patients = per_patient_df["pt_no"].tolist()
+    for plan_type, pct_col in [
+        (PlanType.AUTO.value, "pct_eff_auto"),
+        (PlanType.AUTO_MANUAL.value, "pct_eff_auto_manual"),
+    ]:
+        fig.add_trace(go.Bar(
+            name=plan_type, x=patients, y=per_patient_df[pct_col].tolist(),
+            marker_color=PLAN_COLORS[plan_type],
+            hovertemplate=f"{plan_type}: " + "%{y:.1f}%<extra></extra>",
+        ))
+
+    low, high = EFFICIENCY_BAND_RANGE
+    fig.add_hrect(y0=low, y1=high, fillcolor=AMBER, opacity=0.12, layer="below", line_width=0,
+                 annotation_text=f"Target ({low:g}-{high:g}%)", annotation_position="top left",
+                 annotation_font_color=AMBER)
+
+    fig.update_layout(
+        title="Time efficiency per patient",
+        barmode="group",
+        xaxis=dict(title=None, showgrid=False),
+        yaxis=dict(title="% Time Efficiency", showgrid=True, gridcolor=GRID),
+        legend=_LEGEND_BELOW,
+        margin=_MARGIN_WITH_BOTTOM_LEGEND,
+        plot_bgcolor=_BASE_LAYOUT["plot_bgcolor"], paper_bgcolor=_BASE_LAYOUT["paper_bgcolor"],
+        font=_BASE_LAYOUT["font"],
+    )
+    return fig
+
+
+_PLAN_MARKER_SYMBOLS = {
+    PlanType.MANUAL.value: "circle",
+    PlanType.AUTO.value: "square",
+    PlanType.AUTO_MANUAL.value: "diamond",
+}
+
+
+def pass_rate_vs_time_scatter(scatter_df: pd.DataFrame, correlation=None) -> go.Figure:
+    """%Pass Rate (y) vs planning time (x), colored and shaped by plan
+    type, with a linear fit line when `correlation` (an
+    engine.stats.CorrelationResult) is given. Per the manual's own
+    caption, this is for spotting a trend, not for inference — points
+    from the same patient (several plan types) aren't independent; show
+    that caveat next to this chart, not just the r/ρ numbers."""
+    fig = go.Figure()
+    for plan_type in PLAN_ORDER:
+        plan_df = scatter_df[scatter_df["plan_type"] == plan_type]
+        if plan_df.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            name=plan_type, x=plan_df["planning_time_min"], y=plan_df["pass_rate"],
+            mode="markers",
+            marker=dict(color=PLAN_COLORS[plan_type], symbol=_PLAN_MARKER_SYMBOLS[plan_type],
+                       size=10, line=dict(color="white", width=1)),
+            text=plan_df["pt_no"],
+            hovertemplate=f"{plan_type} — " + "%{text}<br>%{x:.1f} min, %{y:.1f}%<extra></extra>",
+        ))
+
+    if correlation is not None and not scatter_df.empty:
+        x_range = [scatter_df["planning_time_min"].min(), scatter_df["planning_time_min"].max()]
+        y_fit = [correlation.slope * x + correlation.intercept for x in x_range]
+        fig.add_trace(go.Scatter(
+            x=x_range, y=y_fit, mode="lines", line=dict(color="#0F2742", dash="dash", width=1.5),
+            hoverinfo="skip", showlegend=False,
+        ))
+        annotation_text = "<br>".join([
+            f"Pearson r = {correlation.pearson_r:.2f} (p = {correlation.pearson_p:.3f})",
+            f"Spearman ρ = {correlation.spearman_rho:.2f} (p = {correlation.spearman_p:.3f})",
+            f"n = {correlation.n}",
+        ])
+        fig.add_annotation(
+            xref="paper", yref="paper", x=0.02, y=0.98, xanchor="left", yanchor="top",
+            text=annotation_text, showarrow=False, align="left",
+            font=dict(size=12, color="#0F2742"),
+            bgcolor="rgba(255,255,255,0.85)", bordercolor=GRID, borderwidth=1,
+        )
+
+    fig.update_layout(
+        title="Pass rate vs planning time",
+        xaxis=dict(title="Planning time (min)", showgrid=True, gridcolor=GRID),
+        yaxis=dict(title="% Pass Rate", showgrid=True, gridcolor=GRID),
+        legend=_LEGEND_BELOW,
+        margin=_MARGIN_WITH_BOTTOM_LEGEND,
+        plot_bgcolor=_BASE_LAYOUT["plot_bgcolor"], paper_bgcolor=_BASE_LAYOUT["paper_bgcolor"],
+        font=_BASE_LAYOUT["font"],
     )
     return fig

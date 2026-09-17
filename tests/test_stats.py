@@ -133,3 +133,61 @@ def test_mcnemar_manual_vs_auto_none_when_nothing_pairs():
 def test_mcnemar_manual_vs_auto_empty_df():
     df = pd.DataFrame(columns=["pt_no", "plan_type", "goal_key", "status"])
     assert S.mcnemar_manual_vs_auto(df) is None
+
+
+# --------------------------------------------------------------------------- #
+# correlation_pass_rate_vs_time — hand-computed via perfectly (anti)linear data
+# --------------------------------------------------------------------------- #
+
+
+def test_correlation_perfect_positive_linear_relationship():
+    """y = 2x exactly -> Pearson r = 1, slope = 2, intercept = 0, Spearman
+    rho = 1 (also perfectly monotonic). A perfect linear fit with n > 2
+    always gives p = 0 (the t-statistic is infinite) — a fact independent
+    of scipy's own implementation, not just "whatever scipy says"."""
+    x = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+    y = pd.Series([2.0, 4.0, 6.0, 8.0, 10.0])
+    result = S.correlation_pass_rate_vs_time(x, y)
+    assert result is not None
+    assert result.n == 5
+    assert result.pearson_r == pytest.approx(1.0)
+    assert result.pearson_p == pytest.approx(0.0, abs=1e-9)
+    assert result.spearman_rho == pytest.approx(1.0)
+    assert result.slope == pytest.approx(2.0)
+    assert result.intercept == pytest.approx(0.0, abs=1e-9)
+
+
+def test_correlation_perfect_negative_linear_relationship():
+    """y = -2x + 12 -> Pearson r = -1, slope = -2, intercept = 12."""
+    x = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+    y = pd.Series([10.0, 8.0, 6.0, 4.0, 2.0])
+    result = S.correlation_pass_rate_vs_time(x, y)
+    assert result.pearson_r == pytest.approx(-1.0)
+    assert result.spearman_rho == pytest.approx(-1.0)
+    assert result.slope == pytest.approx(-2.0)
+    assert result.intercept == pytest.approx(12.0)
+
+
+def test_correlation_drops_nan_pairs_before_computing():
+    x = pd.Series([1.0, 2.0, 3.0, 4.0, None])
+    y = pd.Series([2.0, 4.0, 6.0, 8.0, 999.0])
+    result = S.correlation_pass_rate_vs_time(x, y)
+    assert result.n == 4  # the row with a missing x is dropped, not treated as 0
+    assert result.pearson_r == pytest.approx(1.0)
+
+
+def test_correlation_none_when_fewer_than_three_points():
+    x = pd.Series([1.0, 2.0])
+    y = pd.Series([2.0, 4.0])
+    assert S.correlation_pass_rate_vs_time(x, y) is None
+
+
+def test_correlation_none_when_x_is_constant():
+    """Every point has the same planning time -> no meaningful fit/slope."""
+    x = pd.Series([5.0, 5.0, 5.0])
+    y = pd.Series([50.0, 60.0, 70.0])
+    assert S.correlation_pass_rate_vs_time(x, y) is None
+
+
+def test_correlation_empty_series():
+    assert S.correlation_pass_rate_vs_time(pd.Series(dtype=float), pd.Series(dtype=float)) is None

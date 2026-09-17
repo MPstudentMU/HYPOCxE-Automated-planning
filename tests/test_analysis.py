@@ -222,3 +222,185 @@ def test_compute_pass_rate_empty_df():
     assert result.per_patient.empty
     assert result.cohort.empty
     assert result.priority1.empty
+
+
+# =========================================================================== #
+# compute_time_efficiency
+# =========================================================================== #
+
+
+@pytest.fixture
+def pt1_pt5_engine_with_times():
+    """Same pilot files as pt1_pt5_engine, but with planning times set so
+    %efficiency is actually computable: Pt1 Manual=100min, Auto=25min
+    (-> exactly 75%, the Target/Exceeds boundary); Pt5 has no Manual plan
+    at all, so no %efficiency is computable for it."""
+    engine = init_db("sqlite://")
+    parsed1 = P.parse_case_files([
+        f"{FIXTURES}/1clinical_goals_90000001_Manual.xlsx",
+        f"{FIXTURES}/1clinical_goals_90000001_Auto.xlsx",
+    ], _form(pt_no="Pt1", hn="90000001", time_manual=100.0, time_auto=25.0))
+    save_case(engine, _form(pt_no="Pt1", hn="90000001", time_manual=100.0, time_auto=25.0),
+             parsed1.plan_frames)
+
+    parsed5 = P.parse_case_files([f"{FIXTURES}/5clinical_goals_90000005_auto.xlsx"],
+                                 _form(pt_no="Pt5", hn="90000005", time_auto=30.0))
+    save_case(engine, _form(pt_no="Pt5", hn="90000005", time_auto=30.0), parsed5.plan_frames)
+    return engine
+
+
+def test_pt1_time_efficiency_hand_checked(pt1_pt5_engine_with_times):
+    """Pt1: Manual=100min, Auto=25min -> (100-25)/100*100 = 75.0% exactly
+    -> Target (40-75% is inclusive of 75). Auto+Manual is straight-pass
+    imputed from Auto (Pt1 uploaded no real Auto+Manual file) -> same
+    25min -> same 75.0% -> same Target band."""
+    result = A.compute_time_efficiency(_pipeline(pt1_pt5_engine_with_times))
+    row = result.per_patient[result.per_patient.pt_no == "Pt1"].iloc[0]
+
+    assert row.time_manual == 100.0
+    assert row.time_auto == 25.0
+    assert row.time_auto_manual == 25.0  # straight-pass: same as Auto
+    assert row.pct_eff_auto == pytest.approx(75.0)
+    assert row.pct_eff_auto_manual == pytest.approx(75.0)
+    assert row.band_auto == "Target"
+    assert row.band_auto_manual == "Target"
+
+
+def test_pt5_time_efficiency_none_without_manual_time(pt1_pt5_engine_with_times):
+    """Pt5 has no Manual plan at all -> time_manual is NaN -> %efficiency
+    is None (undefined), not 0 or some fallback."""
+    result = A.compute_time_efficiency(_pipeline(pt1_pt5_engine_with_times))
+    row = result.per_patient[result.per_patient.pt_no == "Pt5"].iloc[0]
+
+    assert pd.isna(row.time_manual)
+    assert row.time_auto == 30.0
+    assert row.time_auto_manual == 30.0  # straight-pass still copies the time
+    assert pd.isna(row.pct_eff_auto)
+    assert pd.isna(row.pct_eff_auto_manual)
+    # pandas' string dtype coerces a None sitting alongside other rows'
+    # "Target"/"Below"/"Exceeds" strings into NaN once in a DataFrame
+    # column — check with pd.isna(), not `is None` (see efficiency_band's
+    # docstring).
+    assert pd.isna(row.band_auto)
+    assert pd.isna(row.band_auto_manual)
+
+
+def test_time_efficiency_cohort_hand_checked(pt1_pt5_engine_with_times):
+    """Only Pt1 has a defined %efficiency (75.0) for Auto/Auto+Manual ->
+    n=1, mean=75.0, sd undefined (n<2), 1 patient in the Target band."""
+    result = A.compute_time_efficiency(_pipeline(pt1_pt5_engine_with_times))
+    for plan_type in ("Auto", "Auto+Manual"):
+        row = result.cohort[result.cohort.plan_type == plan_type].iloc[0]
+        assert row.n == 1
+        assert row["mean"] == pytest.approx(75.0)
+        assert pd.isna(row["sd"])
+        assert row.n_below == 0
+        assert row.n_target == 1
+        assert row.n_exceeds == 0
+
+
+# --------------------------------------------------------------------------- #
+# efficiency_band — hand-built values covering every band and the boundaries
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("pct_eff,expected", [
+    (None, None),
+    (float("nan"), None),
+    (0.0, "Below"),
+    (39.9, "Below"),
+    (40.0, "Target"),   # lower boundary is inclusive
+    (57.5, "Target"),
+    (75.0, "Target"),   # upper boundary is inclusive
+    (75.1, "Exceeds"),
+    (100.0, "Exceeds"),
+])
+def test_efficiency_band(pct_eff, expected):
+    assert A.efficiency_band(pct_eff) == expected
+
+
+# --------------------------------------------------------------------------- #
+# compute_time_efficiency — hand-built frames for band/edge-case coverage
+# --------------------------------------------------------------------------- #
+
+
+def _time_row(pt_no, plan_type, planning_time_min):
+    return dict(pt_no=pt_no, plan_type=plan_type, planning_time_min=planning_time_min)
+
+
+def test_below_and_exceeds_bands_hand_checked():
+    df = pd.DataFrame([
+        _time_row("PtBelow", "Manual", 100.0), _time_row("PtBelow", "Auto", 70.0),   # 30% -> Below
+        _time_row("PtBelow", "Auto+Manual", 70.0),
+        _time_row("PtExceeds", "Manual", 100.0), _time_row("PtExceeds", "Auto", 10.0),  # 90% -> Exceeds
+        _time_row("PtExceeds", "Auto+Manual", 10.0),
+    ])
+    result = A.compute_time_efficiency(df)
+    below = result.per_patient[result.per_patient.pt_no == "PtBelow"].iloc[0]
+    exceeds = result.per_patient[result.per_patient.pt_no == "PtExceeds"].iloc[0]
+
+    assert below.pct_eff_auto == pytest.approx(30.0)
+    assert below.band_auto == "Below"
+    assert exceeds.pct_eff_auto == pytest.approx(90.0)
+    assert exceeds.band_auto == "Exceeds"
+
+    cohort_auto = result.cohort[result.cohort.plan_type == "Auto"].iloc[0]
+    assert cohort_auto.n_below == 1
+    assert cohort_auto.n_exceeds == 1
+    assert cohort_auto.n_target == 0
+    assert cohort_auto.n == 2
+    assert cohort_auto["mean"] == pytest.approx((30.0 + 90.0) / 2)
+
+
+def test_zero_manual_time_is_undefined_not_division_error():
+    df = pd.DataFrame([_time_row("Pt1", "Manual", 0.0), _time_row("Pt1", "Auto", 10.0)])
+    result = A.compute_time_efficiency(df)
+    row = result.per_patient.iloc[0]
+    assert pd.isna(row.pct_eff_auto)
+    assert row.band_auto is None
+
+
+def test_missing_auto_time_is_none_not_zero():
+    df = pd.DataFrame([_time_row("Pt1", "Manual", 100.0)])  # no Auto row at all
+    result = A.compute_time_efficiency(df)
+    row = result.per_patient.iloc[0]
+    assert pd.isna(row.time_auto)
+    assert pd.isna(row.pct_eff_auto)
+    assert row.band_auto is None
+
+
+def test_compute_time_efficiency_empty_df():
+    result = A.compute_time_efficiency(pd.DataFrame(columns=["pt_no", "plan_type", "planning_time_min"]))
+    assert result.per_patient.empty
+    assert result.cohort.empty
+
+
+# =========================================================================== #
+# pass_rate_vs_time_frame
+# =========================================================================== #
+
+
+def test_pass_rate_vs_time_frame_hand_checked(pt1_pt5_engine_with_times):
+    df = _pipeline(pt1_pt5_engine_with_times)
+    pr = A.compute_pass_rate(df)
+    scatter = A.pass_rate_vs_time_frame(pr, df)
+
+    pt1_auto = scatter[(scatter.pt_no == "Pt1") & (scatter.plan_type == "Auto")].iloc[0]
+    assert pt1_auto.pass_rate == pytest.approx(100.0)
+    assert pt1_auto.planning_time_min == pytest.approx(25.0)
+
+    # Pt5 has no Manual plan at all -> no Manual point in the scatter data
+    assert "Manual" not in set(scatter[scatter.pt_no == "Pt5"]["plan_type"])
+    # every plan type is represented overall (Manual included, per the manual's spec)
+    assert set(scatter["plan_type"]) == {"Manual", "Auto", "Auto+Manual"}
+
+
+def test_pass_rate_vs_time_frame_drops_rows_missing_either_value():
+    pr_per_patient = pd.DataFrame([dict(pt_no="Pt1", plan_type="Auto", pass_rate=80.0)])
+
+    class _FakeResult:
+        per_patient = pr_per_patient
+
+    df = pd.DataFrame([dict(pt_no="Pt1", plan_type="Auto", planning_time_min=None)])
+    scatter = A.pass_rate_vs_time_frame(_FakeResult(), df)
+    assert scatter.empty

@@ -5,6 +5,14 @@ test, so this implements it directly on the two off-diagonal counts of a
 2x2 paired table — the exact binomial test for a small number of
 discordant pairs (matches statsmodels' own default convention), else the
 continuity-corrected chi-square approximation.
+
+correlation_pass_rate_vs_time(): Pearson's r and Spearman's ρ (each with
+its p-value) plus a linear-fit line, for Module 3's %Pass Rate vs Planning
+Time scatter (docs/analysis_manual_th_v2.md, Module 2's visualization
+table). Per the manual's own caption: points from the same patient (one
+per plan type) aren't fully independent, so this is for exploring a trend,
+not for inference — callers should show that caveat next to the numbers,
+not just the numbers.
 """
 from __future__ import annotations
 
@@ -16,7 +24,10 @@ from scipy import stats as sps
 
 from engine.schemas import GoalStatus, PlanType
 
-__all__ = ["McNemarResult", "mcnemar_test", "mcnemar_manual_vs_auto"]
+__all__ = [
+    "McNemarResult", "mcnemar_test", "mcnemar_manual_vs_auto",
+    "CorrelationResult", "correlation_pass_rate_vs_time",
+]
 
 
 @dataclass
@@ -81,3 +92,36 @@ def mcnemar_manual_vs_auto(df: pd.DataFrame) -> Optional[McNemarResult]:
     b = int((manual_pass & ~auto_pass).sum())
     c = int((~manual_pass & auto_pass).sum())
     return mcnemar_test(b, c, n_pairs=len(paired))
+
+
+@dataclass
+class CorrelationResult:
+    n: int
+    pearson_r: float
+    pearson_p: float
+    spearman_rho: float
+    spearman_p: float
+    slope: float
+    """Linear fit: pass_rate = slope * planning_time + intercept."""
+    intercept: float
+
+
+def correlation_pass_rate_vs_time(planning_time: pd.Series, pass_rate: pd.Series) -> Optional[CorrelationResult]:
+    """Pearson's r (with its linear-fit line, from the same regression) and
+    Spearman's ρ between planning time and %Pass Rate, across whatever
+    points are given — typically every (patient, plan type) point pooled
+    together, per the manual's spec. None if there are fewer than 3 paired
+    points, or planning_time is constant (a fit/correlation is undefined
+    either way).
+    """
+    paired = pd.DataFrame({"x": planning_time, "y": pass_rate}).dropna()
+    if len(paired) < 3 or paired["x"].nunique() < 2:
+        return None
+
+    fit = sps.linregress(paired["x"], paired["y"])
+    spearman_rho, spearman_p = sps.spearmanr(paired["x"], paired["y"])
+    return CorrelationResult(
+        n=len(paired), pearson_r=float(fit.rvalue), pearson_p=float(fit.pvalue),
+        spearman_rho=float(spearman_rho), spearman_p=float(spearman_p),
+        slope=float(fit.slope), intercept=float(fit.intercept),
+    )
