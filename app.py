@@ -94,6 +94,7 @@ if "entered_by" not in st.session_state:
 PAGES = {
     "Intake": [
         st.Page("pages/0_new_case.py", title="New Case", icon=":material/note_add:"),
+        st.Page("pages/0b_batch_upload.py", title="Batch Upload", icon=":material/upload_file:"),
         st.Page("pages/1_patient_data.py", title="Patient Data", icon=":material/folder_shared:"),
     ],
     "Analysis": [

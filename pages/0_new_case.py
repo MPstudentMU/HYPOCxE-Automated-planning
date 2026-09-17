@@ -24,18 +24,11 @@ import streamlit as st
 
 from components.db import get_engine
 from components.pending_banner import render_pending_banner
-from components.pending_preview import render_pending_preview
-from engine import corrections as C
+from components.pending_preview import apply_pending_corrections, render_pending_preview
 from engine import parser as P
 from engine.config import DOSE_REGIMEN_UNSET, dose_regimen_choices, rx_for_dose_regimen
-from engine.schemas import (
-    CorrectionField,
-    CorrectionSource,
-    CorrectionStatus,
-    FormInput,
-    PlanType,
-)
-from engine.storage import find_patient_by_pt_no, load_analysis_frame, replace_plan, save_case, update_patient
+from engine.schemas import FormInput, PlanType
+from engine.storage import find_patient_by_pt_no, replace_plan, save_case, update_patient
 
 st.title("New Case")
 st.caption("Module 0 — intake of a new planning case")
@@ -291,49 +284,9 @@ if preview:
                 else:
                     save_case(engine, form, preview["plan_frames"], entered_by=entered_by)
 
-                saved, errors, warns = 0, [], []
-                if not edited_pending.empty:
-                    df = load_analysis_frame(engine)
-                    df = df[df["pt_no"] == form.pt_no]
-                    goal_id_by_key = {
-                        (r.plan_type, r.goal_key): r.goal_id for r in df.itertuples()
-                    }
-                    for _, row in edited_pending.iterrows():
-                        goal_id = goal_id_by_key.get((row["plan_type"], row["goal_key"]))
-                        if goal_id is None:
-                            continue
-                        label = f"{row['plan_type']} / {row['roi']}"
-                        source = CorrectionSource(row["source"]) if row["source"] else None
-
-                        if row["_missing_value"] and (row["confirmed_not_evaluable"] or pd.notna(row["value"])):
-                            try:
-                                status = (CorrectionStatus.CONFIRMED_NOT_EVALUABLE
-                                         if row["confirmed_not_evaluable"] else CorrectionStatus.CORRECTED)
-                                _, warn = C.record_correction(
-                                    engine, goal_id=goal_id, field=CorrectionField.ACHIEVED_VALUE,
-                                    status=status, source=source, reason=row["reason"],
-                                    corrected_by=corrected_by,
-                                    corrected_value_display=(
-                                        None if row["confirmed_not_evaluable"] else float(row["value"])
-                                    ),
-                                )
-                                saved += 1
-                                if warn:
-                                    warns.append(f"{label}: {warn}")
-                            except C.CorrectionValidationError as exc:
-                                errors.append(f"{label}: {exc}")
-
-                        if row["_missing_priority"] and pd.notna(row["priority"]):
-                            try:
-                                C.record_correction(
-                                    engine, goal_id=goal_id, field=CorrectionField.PRIORITY,
-                                    status=CorrectionStatus.CORRECTED, source=source,
-                                    reason=row["reason"], corrected_by=corrected_by,
-                                    corrected_value_display=row["priority"],
-                                )
-                                saved += 1
-                            except C.CorrectionValidationError as exc:
-                                errors.append(f"{label}: {exc}")
+                saved, warns, errors = apply_pending_corrections(
+                    engine, form.pt_no, edited_pending, corrected_by=corrected_by,
+                )
 
                 for w in warns:
                     st.warning(w)

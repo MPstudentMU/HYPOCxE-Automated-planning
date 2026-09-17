@@ -1,20 +1,27 @@
-"""Pre-save pending-goals preview — the New Case upload flow's editor.
+"""Pre-save pending-goals preview — the New Case / Batch Upload flows'
+shared editor.
 
 Different from components/correction_editor.py: that one writes directly to
 engine.storage.GoalCorrection, which needs a real goal_id (a saved row).
 Here nothing is saved yet — parsing just produced a list of PlanFrames in
-memory — so this collects what the user enters and hands it back as a
-DataFrame keyed by (plan_type, goal_key); pages/0_new_case.py applies it via
-engine.corrections.record_correction() right after save_case() gives it real
-goal_ids. Rendering only.
+memory — so render_pending_preview() collects what the user enters and
+hands it back as a DataFrame keyed by (plan_type, goal_key), and
+apply_pending_corrections() turns those rows into real
+engine.corrections.record_correction() calls once save_case()/replace_plan()
+has given every goal a real goal_id. Rendering only, plus that one
+straightforward application step both pages/0_new_case.py and
+pages/0b_batch_upload.py need identically (originally written inline in
+pages/0_new_case.py; factored out here once a second caller needed it).
 """
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy.engine import Engine
 
 from engine import corrections as C
-from engine.schemas import CorrectionSource, PlanFrame
+from engine.schemas import CorrectionField, CorrectionSource, CorrectionStatus, PlanFrame
+from engine.storage import load_analysis_frame
 
 
 def _flagged_rows(plan_frames: list[PlanFrame]) -> pd.DataFrame:
@@ -98,3 +105,65 @@ def render_pending_preview(plan_frames: list[PlanFrame], *, key: str) -> pd.Data
         _missing_value=flagged["_missing_value"].values,
         _missing_priority=flagged["_missing_priority"].values,
     )
+
+
+def apply_pending_corrections(engine: Engine, pt_no: str, edited_pending: pd.DataFrame, *,
+                              corrected_by: str) -> tuple[int, list[str], list[str]]:
+    """Turn render_pending_preview()'s edited rows into real
+    engine.corrections.record_correction() calls, once save_case() (or
+    replace_plan()) has given this patient's goals real goal_ids. Returns
+    (saved_count, warnings, errors) for the caller to display.
+
+    Looks goal_ids up via load_analysis_frame() filtered to `pt_no`, keyed
+    by (plan_type, goal_key) — the same identity render_pending_preview's
+    rows already carry from the in-memory PlanFrames they were built from.
+    A row whose goal_id can't be found (shouldn't happen if save happened
+    first) is silently skipped rather than raising — there's nothing
+    sensible to correct if the goal itself never made it into the database.
+    """
+    saved, errors, warns = 0, [], []
+    if edited_pending.empty:
+        return saved, warns, errors
+
+    df = load_analysis_frame(engine)
+    df = df[df["pt_no"] == pt_no]
+    goal_id_by_key = {(r.plan_type, r.goal_key): r.goal_id for r in df.itertuples()}
+
+    for _, row in edited_pending.iterrows():
+        goal_id = goal_id_by_key.get((row["plan_type"], row["goal_key"]))
+        if goal_id is None:
+            continue
+        label = f"{row['plan_type']} / {row['roi']}"
+        source = CorrectionSource(row["source"]) if row["source"] else None
+
+        if row["_missing_value"] and (row["confirmed_not_evaluable"] or pd.notna(row["value"])):
+            try:
+                status = (CorrectionStatus.CONFIRMED_NOT_EVALUABLE
+                         if row["confirmed_not_evaluable"] else CorrectionStatus.CORRECTED)
+                _, warn = C.record_correction(
+                    engine, goal_id=goal_id, field=CorrectionField.ACHIEVED_VALUE,
+                    status=status, source=source, reason=row["reason"],
+                    corrected_by=corrected_by,
+                    corrected_value_display=(
+                        None if row["confirmed_not_evaluable"] else float(row["value"])
+                    ),
+                )
+                saved += 1
+                if warn:
+                    warns.append(f"{label}: {warn}")
+            except C.CorrectionValidationError as exc:
+                errors.append(f"{label}: {exc}")
+
+        if row["_missing_priority"] and pd.notna(row["priority"]):
+            try:
+                C.record_correction(
+                    engine, goal_id=goal_id, field=CorrectionField.PRIORITY,
+                    status=CorrectionStatus.CORRECTED, source=source,
+                    reason=row["reason"], corrected_by=corrected_by,
+                    corrected_value_display=row["priority"],
+                )
+                saved += 1
+            except C.CorrectionValidationError as exc:
+                errors.append(f"{label}: {exc}")
+
+    return saved, warns, errors
