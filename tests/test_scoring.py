@@ -407,3 +407,23 @@ def test_critical_alert_missing_rx_falls_back_to_acceptance_level_match():
     row = alerts.iloc[0]
     assert row.status == "FAIL (Unacceptable)"
     assert row.basis is not None and row.basis.startswith("fallback")
+
+
+def test_critical_alert_real_pipeline_with_null_dose_regimen_does_not_crash():
+    """A minimal-intake patient (pt_no + files only, engine.schemas.FormInput
+    — Module 0's relaxed intake) has rx_cgy=None all the way through
+    load_analysis_frame; compute_critical_alerts must not crash on it, and
+    should fall back the same way the hand-built rx_cgy=None case above does."""
+    engine = init_db("sqlite://")
+    parsed = P.parse_case_files([
+        f"{FIXTURES}/1clinical_goals_90000001_Manual.xlsx",
+        f"{FIXTURES}/1clinical_goals_90000001_Auto.xlsx",
+    ], FormInput(pt_no="Pt1", hn="90000001"))
+    save_case(engine, FormInput(pt_no="Pt1", hn="90000001"), parsed.plan_frames)
+
+    alerts = S.compute_critical_alerts(_pipeline(engine))
+    assert not alerts.empty
+    assert alerts["rx_cgy"].isna().all()
+    # Doesn't crash, and doesn't fabricate a status for goals it has no
+    # dose to judge against.
+    assert set(alerts["status"]).issubset({"OK", "FAIL (Unacceptable)", "No PTV coverage goal found"})

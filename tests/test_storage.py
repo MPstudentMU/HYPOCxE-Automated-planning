@@ -1,6 +1,7 @@
 """Tests for engine/storage.py, using an in-memory SQLite database."""
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -20,10 +21,12 @@ from engine.storage import (
     GoalResult,
     Patient,
     Plan,
+    get_plan_times,
     init_db,
     load_analysis_frame,
     save_case,
     update_patient,
+    update_plan_times,
 )
 
 
@@ -184,6 +187,85 @@ def test_save_case_with_no_plans_still_creates_patient(engine):
 
 
 # --------------------------------------------------------------------------- #
+# Relaxed intake — save with only pt_no (+ hn, resolved by the parser) and
+# plan files; everything else null until filled in later via Edit
+# --------------------------------------------------------------------------- #
+
+
+def test_save_case_with_only_pt_no_and_plans(engine):
+    """The New Case page's minimal path: pt_no plus whatever plan files
+    were uploaded, nothing else filled in."""
+    form = FormInput(pt_no="PtMinimal", hn="H999")
+    patient_id = save_case(engine, form, [_frame(PlanType.MANUAL), _frame(PlanType.AUTO)])
+
+    with Session(engine) as session:
+        patient = session.get(Patient, patient_id)
+        assert patient.pt_no == "PtMinimal"
+        assert patient.hn == "H999"
+        assert patient.dose_regimen is None
+        assert patient.rx_cgy is None
+        assert patient.fractions is None
+        assert patient.sib_boost is None
+        assert patient.tx_room is None
+        assert patient.mp1 is None
+        assert patient.mp2 is None
+        assert patient.ro is None
+
+        plans = session.exec(select(Plan).where(Plan.patient_id == patient_id)).all()
+        assert {p.plan_type for p in plans} == {PlanType.MANUAL, PlanType.AUTO}
+
+
+def test_save_case_with_only_pt_no_and_no_plans(engine):
+    """Even fewer prerequisites: just pt_no, no plan files yet at all."""
+    patient_id = save_case(engine, FormInput(pt_no="PtBareMinimum", hn="H998"), [])
+    with Session(engine) as session:
+        assert session.get(Patient, patient_id).pt_no == "PtBareMinimum"
+
+
+def test_load_analysis_frame_handles_null_dose_regimen_and_rx_cgy(engine):
+    """load_analysis_frame's enum-unwrapping must not choke on a genuinely
+    missing dose_regimen (None isn't an Enum instance, but confirm it
+    passes straight through rather than erroring)."""
+    save_case(engine, FormInput(pt_no="PtMinimal", hn="H999"), [_frame(PlanType.MANUAL)])
+    df = load_analysis_frame(engine)
+    assert df.loc[0, "dose_regimen"] is None
+    assert pd.isna(df.loc[0, "rx_cgy"])
+
+
+# --------------------------------------------------------------------------- #
+# get_plan_times / update_plan_times — Module 1's Edit dialog planning-time
+# fields
+# --------------------------------------------------------------------------- #
+
+
+def test_get_plan_times_returns_each_uploaded_plans_time(engine):
+    patient_id = save_case(engine, _form(), [
+        _frame(PlanType.MANUAL, planning_time_min=30.0),
+        _frame(PlanType.AUTO, planning_time_min=None),
+    ])
+    times = get_plan_times(engine, patient_id)
+    assert times == {PlanType.MANUAL: 30.0, PlanType.AUTO: None}
+
+
+def test_get_plan_times_empty_for_patient_with_no_plans(engine):
+    patient_id = save_case(engine, _form(), [])
+    assert get_plan_times(engine, patient_id) == {}
+
+
+def test_update_plan_times_sets_time_on_existing_plan(engine):
+    patient_id = save_case(engine, _form(), [_frame(PlanType.MANUAL, planning_time_min=None)])
+    update_plan_times(engine, patient_id, {PlanType.MANUAL: 42.0})
+    assert get_plan_times(engine, patient_id) == {PlanType.MANUAL: 42.0}
+
+
+def test_update_plan_times_skips_plan_type_not_uploaded(engine):
+    """No Plan row exists for Auto yet -- silently skipped, not an error."""
+    patient_id = save_case(engine, _form(), [_frame(PlanType.MANUAL, planning_time_min=None)])
+    update_plan_times(engine, patient_id, {PlanType.MANUAL: 10.0, PlanType.AUTO: 20.0})
+    assert get_plan_times(engine, patient_id) == {PlanType.MANUAL: 10.0}
+
+
+# --------------------------------------------------------------------------- #
 # entered_by — the shared-passphrase session's "Entered by" name (see
 # engine.auth / app.py), stamped onto a save and, on an overwrite, an update.
 # --------------------------------------------------------------------------- #
@@ -312,6 +394,41 @@ def test_form_input_rejects_nonpositive_rx_cgy_or_fractions():
         _form(rx_cgy=0)
     with pytest.raises(ValidationError):
         _form(fractions=0)
+
+
+# --------------------------------------------------------------------------- #
+# FormInput — relaxed intake: only pt_no is truly required (a case can be
+# saved with just plan files, the rest filled in later via Module 1's Edit
+# dialog — see engine.export.load_registry_frame's profile_complete)
+# --------------------------------------------------------------------------- #
+
+
+def test_form_input_requires_only_pt_no():
+    form = FormInput(pt_no="Pt1")
+    assert form.pt_no == "Pt1"
+    assert form.hn is None
+    assert form.dose_regimen is None
+    assert form.rx_cgy is None
+    assert form.fractions is None
+    assert form.sib_boost is None
+    assert form.tx_room is None
+    assert form.mp1 is None
+    assert form.mp2 is None
+    assert form.ro is None
+
+
+def test_form_input_still_rejects_blank_pt_no():
+    with pytest.raises(ValidationError):
+        FormInput(pt_no="")
+
+
+@pytest.mark.parametrize("field", ["tx_room", "mp1", "mp2", "ro"])
+def test_form_input_optional_strings_still_reject_empty_when_given(field):
+    """None (not given) is fine; an explicit empty string is still not a
+    real value — same min_length=1 rule as before, just no longer
+    mandatory that a value be given at all."""
+    with pytest.raises(ValidationError):
+        FormInput(pt_no="Pt1", **{field: ""})
 
 
 # --------------------------------------------------------------------------- #

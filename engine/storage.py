@@ -60,6 +60,8 @@ __all__ = [
     "replace_plan",
     "find_patient_by_pt_no",
     "update_patient",
+    "get_plan_times",
+    "update_plan_times",
     "load_analysis_frame",
     "record_analysis_run",
     "recent_activity",
@@ -89,14 +91,19 @@ class Patient(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     pt_no: str = Field(unique=True, index=True)
     hn: str
-    dose_regimen: DoseRegimen = Field(sa_column=_enum_column(DoseRegimen))
-    rx_cgy: float
-    fractions: int
-    sib_boost: bool
-    tx_room: str
-    mp1: str
-    mp2: str
-    ro: str
+    # Everything below is nullable — a case can be saved with only pt_no
+    # and plan files, the rest filled in later via Module 1's Edit dialog.
+    # See engine.schemas.FormInput and engine.export.load_registry_frame's
+    # profile_complete. hn itself deliberately stays NOT NULL — see
+    # FormInput's docstring.
+    dose_regimen: Optional[DoseRegimen] = Field(default=None, sa_column=_enum_column(DoseRegimen, nullable=True))
+    rx_cgy: Optional[float] = None
+    fractions: Optional[int] = None
+    sib_boost: Optional[bool] = None
+    tx_room: Optional[str] = None
+    mp1: Optional[str] = None
+    mp2: Optional[str] = None
+    ro: Optional[str] = None
     created_at: datetime = Field(default_factory=_utcnow)
     # Who was logged in (the session's one-time "Entered by" name — see
     # engine.auth / app.py) when this case was saved. Session-only
@@ -380,6 +387,39 @@ def update_patient(engine: Engine, patient_id: int, form: FormInput, *,
             if entered_by is not None:
                 patient.entered_by = entered_by
             session.add(patient)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+
+
+def get_plan_times(engine: Engine, patient_id: int) -> dict[PlanType, Optional[float]]:
+    """This patient's currently uploaded plans and their planning_time_min,
+    keyed by plan_type — for Module 1's Edit dialog to pre-fill (only the
+    plan types actually present get a field to edit; there's nothing to
+    set a time on for a plan that hasn't been uploaded)."""
+    with Session(engine) as session:
+        rows = session.exec(
+            select(Plan.plan_type, Plan.planning_time_min).where(Plan.patient_id == patient_id)
+        ).all()
+    return {plan_type: minutes for plan_type, minutes in rows}
+
+
+def update_plan_times(engine: Engine, patient_id: int,
+                      times: dict[PlanType, Optional[float]]) -> None:
+    """Update planning_time_min on this patient's existing plans (Module 1's
+    Edit dialog) — a plan_type with no existing Plan row is silently
+    skipped, since there's no plan to attach a time to yet; editing a
+    plan's actual goal data is replace_plan's job, not this one's."""
+    with Session(engine) as session:
+        try:
+            plans = session.exec(select(Plan).where(Plan.patient_id == patient_id)).all()
+            by_type = {p.plan_type: p for p in plans}
+            for plan_type, minutes in times.items():
+                plan = by_type.get(plan_type)
+                if plan is not None:
+                    plan.planning_time_min = minutes
+                    session.add(plan)
             session.commit()
         except Exception:
             session.rollback()

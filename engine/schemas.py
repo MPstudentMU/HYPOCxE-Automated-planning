@@ -97,31 +97,38 @@ FORM_TIME_FIELD: dict[PlanType, str] = {
 class FormInput(BaseModel):
     """One completed intake form for a case (Module 0 — New Case).
 
-    rx_cgy and fractions aren't in the field list the platform spec gave for
-    this model, but engine.storage.Patient requires both (NOT NULL columns)
-    and nothing else in the intake flow is positioned to supply them, so
-    they're collected here too rather than guessed at save time — see
-    CLAUDE.md rule 1 on not inventing values the manual should define.
+    Only pt_no is truly required. Everything else — dose_regimen (and the
+    rx_cgy/fractions it drives), sib_boost, tx_room, mp1, mp2, ro, and the
+    per-plan planning times — can be filled in later via Module 1's Edit
+    workflow (pages/1_patient_data.py), so a case can be saved the moment
+    its plan files are ready without blocking on details someone else
+    might supply afterward. See engine.export.load_registry_frame's
+    profile_complete for what "later" means in practice, and CLAUDE.md
+    rule 1: rx_cgy/fractions are still only ever derived from dose_regimen
+    (engine.config.rx_for_dose_regimen), never entered independently —
+    None alongside a None dose_regimen, a real pair otherwise.
 
-    hn is optional here (unlike engine.storage.Patient.hn, which is
+    hn is optional here (unlike engine.storage.Patient.hn, which stays
     NOT NULL): engine/parser.py's HN safeguard allows leaving it blank on
     the form and auto-filling it from the uploaded files' filenames when
     they all agree. Resolve it to a definite string (form-entered or
-    filename-derived) before constructing the Patient row.
+    filename-derived) before constructing the Patient row — HN itself was
+    never part of this "relax intake" change and isn't allowed to end up
+    NULL in the database.
     """
 
     model_config = ConfigDict(use_enum_values=False)
 
     hn: Optional[str] = Field(default=None, min_length=1)
     pt_no: str = Field(min_length=1)
-    dose_regimen: DoseRegimen
-    rx_cgy: float = Field(gt=0)
-    fractions: int = Field(gt=0)
-    sib_boost: bool
-    tx_room: str = Field(min_length=1)
-    mp1: str = Field(min_length=1)
-    mp2: str = Field(min_length=1)
-    ro: str = Field(min_length=1)
+    dose_regimen: Optional[DoseRegimen] = None
+    rx_cgy: Optional[float] = Field(default=None, gt=0)
+    fractions: Optional[int] = Field(default=None, gt=0)
+    sib_boost: Optional[bool] = None
+    tx_room: Optional[str] = Field(default=None, min_length=1)
+    mp1: Optional[str] = Field(default=None, min_length=1)
+    mp2: Optional[str] = Field(default=None, min_length=1)
+    ro: Optional[str] = Field(default=None, min_length=1)
 
     time_manual: Optional[float] = Field(default=None, gt=0)
     time_auto: Optional[float] = Field(default=None, gt=0)

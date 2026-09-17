@@ -375,6 +375,26 @@ def test_compute_time_efficiency_empty_df():
     assert result.cohort.empty
 
 
+def test_compute_time_efficiency_real_pipeline_with_null_planning_time_does_not_crash():
+    """A minimal-intake patient (pt_no + files only, engine.schemas.FormInput
+    — Module 0's relaxed intake) has planning_time_min=None on every plan
+    (no time was ever entered). Module 3's page formats NaN as "—"
+    already; this confirms the calculation itself doesn't crash and
+    reports "not computable" (None), not a fabricated 0%."""
+    engine = init_db("sqlite://")
+    parsed = P.parse_case_files([
+        f"{FIXTURES}/1clinical_goals_90000001_Manual.xlsx",
+        f"{FIXTURES}/1clinical_goals_90000001_Auto.xlsx",
+    ], FormInput(pt_no="Pt1", hn="90000001"))
+    save_case(engine, FormInput(pt_no="Pt1", hn="90000001"), parsed.plan_frames)
+
+    result = A.compute_time_efficiency(_pipeline(engine))
+    row = result.per_patient.iloc[0]
+    assert pd.isna(row.time_manual) and pd.isna(row.time_auto)
+    assert pd.isna(row.pct_eff_auto)
+    assert row.band_auto is None
+
+
 # =========================================================================== #
 # pass_rate_vs_time_frame
 # =========================================================================== #

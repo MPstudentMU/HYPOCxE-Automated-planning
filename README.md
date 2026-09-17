@@ -44,11 +44,16 @@ app is meant to run on one machine on the clinic's local network — see
 [Access control](#access-control) below for why.
 
 > If you have an existing `data/hypocxe.db` from before the `entered_by`
-> column was added to `patients`/`analysis_runs` (see Access control),
-> delete it (or back it up and start fresh) before running the app again —
-> `engine.storage.init_db` only creates missing *tables*, not missing
-> *columns* on a table that already exists, so an old file will raise
-> `sqlite3.OperationalError: no such column` rather than silently working.
+> column was added to `patients`/`analysis_runs` (see Access control), or
+> from before `patients.dose_regimen`/`rx_cgy`/`fractions`/`sib_boost`/
+> `tx_room`/`mp1`/`mp2`/`ro` became nullable (a case can now be saved with
+> only `pt_no` and plan files — see Patient Data's Edit workflow), delete
+> it (or back it up and start fresh) before running the app again —
+> `engine.storage.init_db` only creates missing *tables*; it neither adds
+> missing *columns* to a table that already exists nor relaxes an existing
+> column's constraints, so an old file will raise `sqlite3.OperationalError`
+> (`no such column`, or `NOT NULL constraint failed`) rather than silently
+> working.
 
 On every process start, `app.py` makes a same-day backup of `data/hypocxe.db`
 into `data/backups/` (one file per calendar day; a no-op if today's backup

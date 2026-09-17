@@ -67,9 +67,18 @@ def mask_hn(hn: str) -> str:
 def load_registry_frame(engine: Engine) -> pd.DataFrame:
     """One row per patient: case metadata, which plans have been uploaded,
     whether the Auto+Manual plan was a straight pass, how many of the
-    patient's goals are still pending review, and when the case was
-    created. `hn` is included as-is (not masked) — apply mask_hn() where
-    it's actually displayed/exported.
+    patient's goals are still pending review, whether the patient's own
+    profile is complete, and when the case was created. `hn` is included
+    as-is (not masked) — apply mask_hn() where it's actually displayed/
+    exported.
+
+    profile_complete is computed here, not stored: False if dose_regimen,
+    tx_room, mp1, mp2 or ro is null, or if any of the patient's *uploaded*
+    plans has no planning_time_min. A case can be saved with only pt_no
+    and plan files (engine.schemas.FormInput) — this is what tells Module
+    1 which patients still need their details filled in via its Edit
+    dialog. Independent of pending_count, which is about goal-level data
+    (engine.corrections), not this case-level metadata.
     """
     with Session(engine) as session:
         patients = session.exec(select(Patient)).all()
@@ -89,10 +98,20 @@ def load_registry_frame(engine: Engine) -> pd.DataFrame:
         )
         am_plan = next((p for p in patient_plans if p.plan_type == PlanType.AUTO_MANUAL), None)
 
+        missing_plan_time = any(p.planning_time_min is None for p in patient_plans)
+        profile_complete = not (
+            patient.dose_regimen is None
+            or patient.tx_room is None
+            or patient.mp1 is None
+            or patient.mp2 is None
+            or patient.ro is None
+            or missing_plan_time
+        )
+
         rows.append(dict(
             pt_no=patient.pt_no,
             hn=patient.hn,
-            dose_regimen=patient.dose_regimen.value,
+            dose_regimen=patient.dose_regimen.value if patient.dose_regimen is not None else None,
             sib_boost=patient.sib_boost,
             tx_room=patient.tx_room,
             mp1=patient.mp1,
@@ -101,11 +120,12 @@ def load_registry_frame(engine: Engine) -> pd.DataFrame:
             plans_uploaded=", ".join(plan_types_present) if plan_types_present else "—",
             straight_pass=am_plan.is_straight_pass if am_plan else None,
             pending_count=pending_by_pt_no.get(patient.pt_no, 0),
+            profile_complete=profile_complete,
             created_at=patient.created_at,
         ))
 
     columns = ["pt_no", "hn", "dose_regimen", "sib_boost", "tx_room", "mp1", "mp2", "ro",
-              "plans_uploaded", "straight_pass", "pending_count", "created_at"]
+              "plans_uploaded", "straight_pass", "pending_count", "profile_complete", "created_at"]
     return pd.DataFrame(rows, columns=columns)
 
 

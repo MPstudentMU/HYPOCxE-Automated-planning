@@ -143,6 +143,95 @@ def test_load_registry_frame_pending_count_drops_after_correction(engine):
     assert df.iloc[0]["pending_count"] == 0
 
 
+def test_load_registry_frame_profile_complete_true_when_everything_is_set(engine):
+    save_case(engine, _form(), [
+        PlanFrame(plan_type=PlanType.MANUAL, planning_time_min=30.0, goals=[_goal()]),
+    ])
+    df = load_registry_frame(engine)
+    assert bool(df.iloc[0]["profile_complete"]) is True
+
+
+def test_load_registry_frame_profile_complete_true_with_no_plans_uploaded_yet():
+    """profile_complete only checks planning_time_min on plans that were
+    actually uploaded -- no plans means nothing to fail that check."""
+    engine = init_db("sqlite://")
+    save_case(engine, _form(), [])
+    df = load_registry_frame(engine)
+    assert bool(df.iloc[0]["profile_complete"]) is True
+
+
+@pytest.mark.parametrize("missing_field", ["dose_regimen", "tx_room", "mp1", "mp2", "ro"])
+def test_load_registry_frame_profile_incomplete_when_a_patient_field_is_null(missing_field):
+    from engine.schemas import FormInput
+
+    engine = init_db("sqlite://")
+    fields = dict(hn="90000001", pt_no="Pt1", dose_regimen=DoseRegimen.HYPO, rx_cgy=4400,
+                 fractions=20, sib_boost=False, tx_room="Room1", mp1="Alice", mp2="Bob",
+                 ro="Dr. Carter")
+    fields[missing_field] = None
+    save_case(engine, FormInput(**fields), [
+        PlanFrame(plan_type=PlanType.MANUAL, planning_time_min=30.0, goals=[_goal()]),
+    ])
+    df = load_registry_frame(engine)
+    assert bool(df.iloc[0]["profile_complete"]) is False
+
+
+def test_load_registry_frame_profile_incomplete_when_an_uploaded_plan_has_no_time(engine):
+    save_case(engine, _form(), [
+        PlanFrame(plan_type=PlanType.MANUAL, planning_time_min=None, goals=[_goal()]),
+    ])
+    df = load_registry_frame(engine)
+    assert bool(df.iloc[0]["profile_complete"]) is False
+
+
+def test_load_registry_frame_masks_hn_never_touches_profile_complete(engine):
+    """profile_complete is independent of pending_count and unrelated to hn
+    -- sanity check the two booleans don't get confused with each other."""
+    save_case(engine, _form(), [
+        PlanFrame(plan_type=PlanType.MANUAL, planning_time_min=30.0, goals=[
+            _goal(achieved_value=None, status=None, evaluable=False),  # pending, but complete profile
+        ]),
+    ])
+    df = load_registry_frame(engine)
+    assert bool(df.iloc[0]["profile_complete"]) is True
+    assert df.iloc[0]["pending_count"] == 1
+
+
+def test_load_registry_frame_dose_regimen_null_does_not_crash():
+    """Regression: dose_regimen=None used to crash on .value."""
+    from engine.schemas import FormInput
+
+    engine = init_db("sqlite://")
+    save_case(engine, FormInput(pt_no="PtMinimal", hn="90000009"), [])
+    df = load_registry_frame(engine)
+    assert df.iloc[0]["dose_regimen"] is None
+
+
+def test_edit_workflow_flips_profile_complete_to_true():
+    """The exact sequence Module 1's Edit dialog performs: a minimal
+    (pt_no + files only) save is profile_complete=False; filling in every
+    missing field via update_patient/update_plan_times flips it to True."""
+    from engine.schemas import FormInput
+    from engine.storage import find_patient_by_pt_no, update_patient, update_plan_times
+
+    engine = init_db("sqlite://")
+    patient_id = save_case(engine, FormInput(pt_no="PtMinimal", hn="90000009"), [
+        PlanFrame(plan_type=PlanType.MANUAL, planning_time_min=None, goals=[_goal()]),
+    ])
+
+    before = load_registry_frame(engine)
+    assert bool(before.iloc[0]["profile_complete"]) is False
+
+    update_patient(engine, patient_id, _form(pt_no="PtMinimal", hn="90000009"))
+    update_plan_times(engine, patient_id, {PlanType.MANUAL: 25.0})
+
+    after = load_registry_frame(engine)
+    assert bool(after.iloc[0]["profile_complete"]) is True
+    patient = find_patient_by_pt_no(engine, "PtMinimal")
+    assert patient.dose_regimen == DoseRegimen.HYPO
+    assert patient.tx_room == "Room1"
+
+
 def test_load_registry_frame_multiple_patients(engine):
     save_case(engine, _form(pt_no="Pt1", hn="90000001"),
              [PlanFrame(plan_type=PlanType.MANUAL, goals=[_goal()])])

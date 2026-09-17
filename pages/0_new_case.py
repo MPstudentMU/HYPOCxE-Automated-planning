@@ -27,12 +27,11 @@ from components.pending_banner import render_pending_banner
 from components.pending_preview import render_pending_preview
 from engine import corrections as C
 from engine import parser as P
-from engine.config import rx_for_dose_regimen
+from engine.config import DOSE_REGIMEN_UNSET, dose_regimen_choices, rx_for_dose_regimen
 from engine.schemas import (
     CorrectionField,
     CorrectionSource,
     CorrectionStatus,
-    DoseRegimen,
     FormInput,
     PlanType,
 )
@@ -44,12 +43,12 @@ st.caption("Module 0 — intake of a new planning case")
 engine = get_engine()
 render_pending_banner(engine)
 
-DOSE_CHOICES = {
-    f"Hypo — {rx_for_dose_regimen(DoseRegimen.HYPO)[0]/100:g} Gy / "
-    f"{rx_for_dose_regimen(DoseRegimen.HYPO)[1]} fx": DoseRegimen.HYPO,
-    f"Conv — {rx_for_dose_regimen(DoseRegimen.CONV)[0]/100:g} Gy / "
-    f"{rx_for_dose_regimen(DoseRegimen.CONV)[1]} fx": DoseRegimen.CONV,
-}
+# Only pt_no and the plan files are actually required to save a case —
+# everything else here (dose regimen, tx room, MP1/MP2/RO, planning time)
+# can be left blank and filled in later via Module 1's Edit dialog. See
+# engine.schemas.FormInput and engine.export.load_registry_frame's
+# profile_complete.
+DOSE_CHOICES = dose_regimen_choices()
 
 CHOOSE = "— choose —"
 SKIP = "Skip"
@@ -70,7 +69,11 @@ c1, c2 = st.columns(2)
 with c1:
     hn = st.text_input("HN", help="Leave blank to use the value from the uploaded filenames.")
     pt_no = st.text_input("Patient no.", placeholder="Pt7")
-    dose_choice = st.radio("Dose regimen", list(DOSE_CHOICES.keys()))
+    dose_choice = st.radio(
+        "Dose regimen", [DOSE_REGIMEN_UNSET, *DOSE_CHOICES.keys()],
+        help="Optional at intake — leave unset and fill it in later via Edit (Module 1) if "
+            "you don't have it yet.",
+    )
     sib_boost = st.checkbox("SIB boost")
     overwrite = st.checkbox(
         "Overwrite if this patient no. already exists",
@@ -198,19 +201,20 @@ if preview_clicked:
                 "'Overwrite if this patient no. already exists' to replace it."
             )
         else:
-            rx_cgy, fractions = rx_for_dose_regimen(DOSE_CHOICES[dose_choice])
+            dose_regimen = DOSE_CHOICES.get(dose_choice)  # None if left unset
+            rx_cgy, fractions = rx_for_dose_regimen(dose_regimen) if dose_regimen else (None, None)
             try:
                 form = FormInput(
                     hn=hn.strip() or None,
                     pt_no=pt_no.strip(),
-                    dose_regimen=DOSE_CHOICES[dose_choice],
+                    dose_regimen=dose_regimen,
                     rx_cgy=rx_cgy,
                     fractions=fractions,
                     sib_boost=sib_boost,
-                    tx_room=tx_room.strip(),
-                    mp1=mp1.strip(),
-                    mp2=mp2.strip(),
-                    ro=ro.strip(),
+                    tx_room=tx_room.strip() or None,
+                    mp1=mp1.strip() or None,
+                    mp2=mp2.strip() or None,
+                    ro=ro.strip() or None,
                     time_manual=time_manual or None,
                     time_auto=time_auto or None,
                     time_automanual=time_automanual or None,
@@ -253,7 +257,8 @@ preview = st.session_state.get("new_case_preview")
 if preview:
     st.divider()
     form: FormInput = preview["form"]
-    st.subheader(f"{form.pt_no} — {form.dose_regimen.value}")
+    regimen_label = form.dose_regimen.value if form.dose_regimen else "no dose regimen set"
+    st.subheader(f"{form.pt_no} — {regimen_label}")
 
     for w in preview["warnings"]:
         st.info(w, icon="ℹ️")
