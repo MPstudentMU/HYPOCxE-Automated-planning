@@ -27,6 +27,15 @@ identical efficiency, for free — no special-casing needed here.
 Expected pipeline before either: engine.storage.load_analysis_frame ->
 engine.corrections.apply_corrections -> engine.imputation.apply_straight_pass
 -> compute_pass_rate / compute_time_efficiency.
+
+compute_goal_scores() / compute_critical_alerts() are re-exported here from
+engine.scoring, where they're actually implemented (alongside score_goal()
+and Criteria V0's application — see that module's docstring for why they
+live there). pages/4_plan_quality.py's ADAPTER section was written against
+`engine.analysis.compute_goal_scores`/`compute_critical_alerts` before
+either existed; re-exporting satisfies that without duplicating the
+implementation or moving it out of what's otherwise a clean split (goal-
+level scoring vs. cohort-level analysis).
 """
 from __future__ import annotations
 
@@ -37,11 +46,13 @@ import numpy as np
 import pandas as pd
 
 from engine.schemas import GoalStatus, PlanType
+from engine.scoring import compute_critical_alerts, compute_goal_scores  # noqa: F401  (re-export)
 
 __all__ = [
     "PassRateResult", "PASS_RATE_TARGETS", "compute_pass_rate",
     "TimeEfficiencyResult", "EFFICIENCY_BAND_RANGE", "efficiency_band", "compute_time_efficiency",
     "pass_rate_vs_time_frame",
+    "compute_goal_scores", "compute_critical_alerts",  # re-exported from engine.scoring
 ]
 
 # Targets from docs/analysis_manual_th_v2.md, Module 1's table — Manual is

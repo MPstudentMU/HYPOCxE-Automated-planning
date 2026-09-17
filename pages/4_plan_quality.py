@@ -1,8 +1,9 @@
 """
 Module 4 – Plan Quality Score (with Priority Filtering)
 
-Integration points (adapt the two functions in the ADAPTER section to your
-v2 engine names; everything below them is ready to use):
+ADAPTER section wired to the real engine (engine.scoring.compute_goal_scores
+/ compute_critical_alerts, re-exported from engine.analysis — see that
+module's docstring):
   * load_goal_scores()   -> goal-level scoring DataFrame (see
                             engine/priority_filter.py for required columns)
   * load_critical_alerts() -> DataFrame of PTV coverage alerts (unfiltered)
@@ -36,18 +37,29 @@ LAYOUT = dict(margin=dict(l=20, r=20, t=50, b=150),
 # --------------------------------------------------------------------------- #
 # ADAPTER – connect to your existing engine
 # --------------------------------------------------------------------------- #
+@st.cache_data(show_spinner="Loading and correcting cohort data…")
+def _pipeline_df(settings_key: str) -> pd.DataFrame:
+    # The shared corrected+straight-pass-imputed frame both adapter
+    # functions score from — computed once, not once per function.
+    from engine import corrections, imputation
+    from engine.storage import load_analysis_frame
+    engine = get_engine()
+    raw = load_analysis_frame(engine)
+    return imputation.apply_straight_pass(corrections.apply_corrections(raw, engine))
+
+
 @st.cache_data(show_spinner="Scoring plans with Criteria V0…")
 def load_goal_scores(settings_key: str) -> pd.DataFrame:
     # Full, unfiltered scoring is cached; the priority filter is applied
     # afterwards, so changing the filter never re-scores anything.
     from engine import analysis
-    return analysis.compute_goal_scores()          # <- adapt name
+    return analysis.compute_goal_scores(_pipeline_df(settings_key))
 
 
 @st.cache_data
 def load_critical_alerts(settings_key: str) -> pd.DataFrame:
     from engine import analysis
-    return analysis.compute_critical_alerts()      # <- adapt name
+    return analysis.compute_critical_alerts(_pipeline_df(settings_key))
 
 
 # --------------------------------------------------------------------------- #
