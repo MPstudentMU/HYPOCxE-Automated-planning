@@ -283,6 +283,21 @@ def test_build_analysis_workbook_run_info_has_version_and_hash(pt1_pt5_engine):
     assert run_info["Active priority filter (M4)"] == "All Priorities"
     assert bool(run_info["Pass rate: exclude non-evaluable goals"]) is True
     assert "Export timestamp (UTC)" in run_info.index
+    assert run_info["Entered by"] == "—"  # no entered_by given -> shown, not blank
+
+
+def test_build_analysis_workbook_stamps_entered_by(pt1_pt5_engine):
+    from sqlmodel import Session
+    from engine.storage import AnalysisRun
+
+    workbook = build_analysis_workbook(pt1_pt5_engine, entered_by="Dr. Somchai")
+    run_info = pd.ExcelFile(io.BytesIO(workbook), engine="openpyxl") \
+        .parse("RunInfo").set_index("field")["value"]
+    assert run_info["Entered by"] == "Dr. Somchai"
+
+    with Session(pt1_pt5_engine) as session:
+        run_id = int(run_info["Analysis run id"])
+        assert session.get(AnalysisRun, run_id).entered_by == "Dr. Somchai"
 
 
 def test_build_analysis_workbook_criteria_version_constant_is_lowercase():

@@ -98,6 +98,11 @@ class Patient(SQLModel, table=True):
     mp2: str
     ro: str
     created_at: datetime = Field(default_factory=_utcnow)
+    # Who was logged in (the session's one-time "Entered by" name — see
+    # engine.auth / app.py) when this case was saved. Session-only
+    # attribution, not a user account; None for rows saved before this
+    # column existed or outside the app (e.g. most tests).
+    entered_by: Optional[str] = None
 
     plans: List["Plan"] = Relationship(back_populates="patient")
 
@@ -183,6 +188,10 @@ class AnalysisRun(SQLModel, table=True):
     engine_version: str
     criteria_version: str
     settings_json: str
+    # The session's "Entered by" name at export time (see Patient.entered_by
+    # above) — None for a run logged outside the app, or before this column
+    # existed.
+    entered_by: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -279,9 +288,14 @@ def _upsert_plan(session: Session, patient_id: int, frame: PlanFrame) -> int:
     return plan_id
 
 
-def save_case(engine: Engine, form: FormInput, plan_frames: Sequence[PlanFrame]) -> int:
+def save_case(engine: Engine, form: FormInput, plan_frames: Sequence[PlanFrame], *,
+              entered_by: Optional[str] = None) -> int:
     """Persist one case (a patient plus one or more plans and their goal
     results) as a single transaction. Returns the new patient's id.
+
+    `entered_by` is the app session's one-time "Entered by" name (see
+    engine.auth / app.py) — stamped onto the new Patient row for
+    traceability; None outside the app (most tests don't pass it).
 
     Raises whatever the underlying database raises (e.g. IntegrityError on a
     duplicate pt_no) after rolling the whole transaction back — no partial
@@ -300,6 +314,7 @@ def save_case(engine: Engine, form: FormInput, plan_frames: Sequence[PlanFrame])
                 mp1=form.mp1,
                 mp2=form.mp2,
                 ro=form.ro,
+                entered_by=entered_by,
             )
             session.add(patient)
             session.flush()  # assigns patient.id without ending the transaction
@@ -337,10 +352,17 @@ def find_patient_by_pt_no(engine: Engine, pt_no: str) -> Optional[Patient]:
         return session.exec(select(Patient).where(Patient.pt_no == pt_no)).first()
 
 
-def update_patient(engine: Engine, patient_id: int, form: FormInput) -> None:
+def update_patient(engine: Engine, patient_id: int, form: FormInput, *,
+                    entered_by: Optional[str] = None) -> None:
     """Update an existing patient's intake fields in place (a re-upload
     that also corrects the case's metadata). Does not touch its plans —
-    see replace_plan for that."""
+    see replace_plan for that.
+
+    `entered_by` (the app session's "Entered by" name — see save_case)
+    overwrites the stored attribution only when given; None leaves whoever
+    was recorded on the original save/last update untouched, rather than
+    blanking it out for a caller that doesn't know about it.
+    """
     with Session(engine) as session:
         try:
             patient = session.get(Patient, patient_id)
@@ -355,6 +377,8 @@ def update_patient(engine: Engine, patient_id: int, form: FormInput) -> None:
             patient.mp1 = form.mp1
             patient.mp2 = form.mp2
             patient.ro = form.ro
+            if entered_by is not None:
+                patient.entered_by = entered_by
             session.add(patient)
             session.commit()
         except Exception:
@@ -441,14 +465,15 @@ def load_analysis_frame(engine: Engine) -> pd.DataFrame:
 
 
 def record_analysis_run(engine: Engine, *, engine_version: str, criteria_version: str,
-                        settings_json: str) -> int:
+                        settings_json: str, entered_by: Optional[str] = None) -> int:
     """Log one row to analysis_runs. engine/export.py calls this every
     time it builds an export workbook, so every export is traceable to
-    exactly the engine/criteria version and settings that produced it."""
+    exactly the engine/criteria version and settings that produced it —
+    plus, now, who was logged in (entered_by) when they built it."""
     with Session(engine) as session:
         try:
             run = AnalysisRun(engine_version=engine_version, criteria_version=criteria_version,
-                              settings_json=settings_json)
+                              settings_json=settings_json, entered_by=entered_by)
             session.add(run)
             session.commit()
             session.refresh(run)

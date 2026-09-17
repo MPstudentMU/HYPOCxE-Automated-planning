@@ -126,6 +126,7 @@ def build_analysis_workbook(
     *,
     priority_selection: Optional[PrioritySelection] = None,
     pass_rate_settings: Optional[dict] = None,
+    entered_by: Optional[str] = None,
 ) -> bytes:
     """Build one .xlsx workbook (as bytes) covering every module, and log
     one analysis_runs row for it. Sheets, in order:
@@ -140,6 +141,9 @@ def build_analysis_workbook(
     what they were looking at. `pass_rate_settings` overrides
     DEFAULT_PASS_RATE_SETTINGS the same way — a dict with any of
     exclude_non_evaluable/exclude_no_priority/matched_goals_only.
+    `entered_by` is the app session's "Entered by" name (see engine.auth /
+    app.py) — recorded on the analysis_runs row and shown in RunInfo, None
+    outside the app.
     """
     selection = priority_selection or PrioritySelection.all()
     settings = dict(DEFAULT_PASS_RATE_SETTINGS)
@@ -178,6 +182,7 @@ def build_analysis_workbook(
     run_id = record_analysis_run(
         engine, engine_version=ENGINE_VERSION,
         criteria_version=CRITERIA_VERSION.upper(), settings_json=settings_json,
+        entered_by=entered_by,
     )
 
     run_info = pd.DataFrame([
@@ -185,6 +190,7 @@ def build_analysis_workbook(
         dict(field="Criteria version", value=CRITERIA_VERSION.upper()),
         dict(field="Criteria SHA-256", value=CRITERIA_SHA256),
         dict(field="Analysis run id", value=run_id),
+        dict(field="Entered by", value=entered_by or "—"),
         dict(field="Active priority filter (M4)", value=selection.label),
         dict(field="Pass rate: exclude non-evaluable goals", value=settings["exclude_non_evaluable"]),
         dict(field="Pass rate: exclude goals without priority", value=settings["exclude_no_priority"]),

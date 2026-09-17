@@ -53,7 +53,9 @@ def render_correction_editor(engine, corrected_df: pd.DataFrame, *, key: str) ->
     pending["reason"] = ""
 
     corrected_by = st.text_input(
-        "Your name (required to save any correction below)", key=f"{key}_corrected_by"
+        "Your name (required to save any correction below)",
+        value=st.session_state.get("entered_by", ""),
+        key=f"{key}_corrected_by",
     )
 
     editable_cols = ["pt_no", "plan_type", "roi", "goal_text", "issue", "unit",

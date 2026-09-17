@@ -53,6 +53,7 @@ if st.button("Prepare export", icon=":material/table_view:"):
     with st.spinner("Building workbook…"):
         st.session_state["export_workbook"] = build_analysis_workbook(
             engine, priority_selection=selection,
+            entered_by=st.session_state.get("entered_by"),
         )
         st.session_state["export_workbook_built_at"] = datetime.now()
 

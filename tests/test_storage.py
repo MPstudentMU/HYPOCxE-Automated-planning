@@ -16,7 +16,15 @@ from engine.schemas import (
     PlanType,
     StructureClass,
 )
-from engine.storage import GoalResult, Patient, Plan, init_db, load_analysis_frame, save_case
+from engine.storage import (
+    GoalResult,
+    Patient,
+    Plan,
+    init_db,
+    load_analysis_frame,
+    save_case,
+    update_patient,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -173,6 +181,42 @@ def test_save_case_with_no_plans_still_creates_patient(engine):
     with Session(engine) as session:
         assert session.get(Patient, patient_id) is not None
         assert session.exec(select(Plan)).all() == []
+
+
+# --------------------------------------------------------------------------- #
+# entered_by — the shared-passphrase session's "Entered by" name (see
+# engine.auth / app.py), stamped onto a save and, on an overwrite, an update.
+# --------------------------------------------------------------------------- #
+
+
+def test_save_case_stamps_entered_by(engine):
+    patient_id = save_case(engine, _form(), [_frame(PlanType.MANUAL)], entered_by="Dr. Somchai")
+    with Session(engine) as session:
+        assert session.get(Patient, patient_id).entered_by == "Dr. Somchai"
+
+
+def test_save_case_entered_by_defaults_to_none(engine):
+    """Callers outside the app (most of this test suite) don't pass
+    entered_by — must not be required."""
+    patient_id = save_case(engine, _form(), [_frame(PlanType.MANUAL)])
+    with Session(engine) as session:
+        assert session.get(Patient, patient_id).entered_by is None
+
+
+def test_update_patient_overwrites_entered_by_when_given(engine):
+    patient_id = save_case(engine, _form(), [_frame(PlanType.MANUAL)], entered_by="Dr. Somchai")
+    update_patient(engine, patient_id, _form(mp1="Changed"), entered_by="Dr. Anong")
+    with Session(engine) as session:
+        assert session.get(Patient, patient_id).entered_by == "Dr. Anong"
+
+
+def test_update_patient_leaves_entered_by_untouched_when_not_given(engine):
+    """A caller that doesn't know about entered_by (e.g. an older script)
+    shouldn't blank out the original save's attribution."""
+    patient_id = save_case(engine, _form(), [_frame(PlanType.MANUAL)], entered_by="Dr. Somchai")
+    update_patient(engine, patient_id, _form(mp1="Changed"))
+    with Session(engine) as session:
+        assert session.get(Patient, patient_id).entered_by == "Dr. Somchai"
 
 
 # --------------------------------------------------------------------------- #

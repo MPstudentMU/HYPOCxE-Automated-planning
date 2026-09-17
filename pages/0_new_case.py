@@ -159,6 +159,7 @@ if preview:
     if not edited_pending.empty:
         corrected_by = st.text_input(
             "Your name (required to save any correction filled in above)",
+            value=st.session_state.get("entered_by", ""),
             key="new_case_corrected_by",
         )
 
@@ -172,12 +173,13 @@ if preview:
             st.error("Enter your name before saving — at least one correction was filled in.")
         else:
             try:
+                entered_by = st.session_state.get("entered_by")
                 if preview["overwrite"]:
-                    update_patient(engine, preview["existing_patient_id"], form)
+                    update_patient(engine, preview["existing_patient_id"], form, entered_by=entered_by)
                     for frame in preview["plan_frames"]:
                         replace_plan(engine, preview["existing_patient_id"], frame)
                 else:
-                    save_case(engine, form, preview["plan_frames"])
+                    save_case(engine, form, preview["plan_frames"], entered_by=entered_by)
 
                 saved, errors, warns = 0, [], []
                 if not edited_pending.empty:

@@ -53,6 +53,25 @@ def test_record_analysis_run_ids_increment(engine):
     assert id2 > id1
 
 
+def test_record_analysis_run_stamps_entered_by(engine):
+    from sqlmodel import Session
+    from engine.storage import AnalysisRun
+
+    run_id = record_analysis_run(engine, engine_version="2.0", criteria_version="v0",
+                                 settings_json="{}", entered_by="Dr. Somchai")
+    with Session(engine) as session:
+        assert session.get(AnalysisRun, run_id).entered_by == "Dr. Somchai"
+
+
+def test_record_analysis_run_entered_by_defaults_to_none(engine):
+    from sqlmodel import Session
+    from engine.storage import AnalysisRun
+
+    run_id = record_analysis_run(engine, engine_version="2.0", criteria_version="v0", settings_json="{}")
+    with Session(engine) as session:
+        assert session.get(AnalysisRun, run_id).entered_by is None
+
+
 # --------------------------------------------------------------------------- #
 # recent_activity
 # --------------------------------------------------------------------------- #

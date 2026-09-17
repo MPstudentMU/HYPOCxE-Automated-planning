@@ -22,6 +22,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+The app is gated behind a shared passphrase (see
+[Access control](#access-control)) and won't start without one configured:
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+python -c "import hashlib; print(hashlib.sha256(b'yourpassphrase').hexdigest())"
+# paste the printed hash into .streamlit/secrets.toml as app_passphrase_hash
+```
+
 ## Running locally
 
 ```bash
@@ -31,7 +40,15 @@ streamlit run app.py
 This starts a local web server (default `http://localhost:8501`) backed by a
 SQLite database at `data/hypocxe.db`, created automatically on first run. The
 app is meant to run on one machine on the clinic's local network — see
-[PDPA / HN handling](#pdpa--hn-handling) below for why.
+[PDPA / HN handling](#pdpa--hn-handling) and
+[Access control](#access-control) below for why.
+
+> If you have an existing `data/hypocxe.db` from before the `entered_by`
+> column was added to `patients`/`analysis_runs` (see Access control),
+> delete it (or back it up and start fresh) before running the app again —
+> `engine.storage.init_db` only creates missing *tables*, not missing
+> *columns* on a table that already exists, so an old file will raise
+> `sqlite3.OperationalError: no such column` rather than silently working.
 
 On every process start, `app.py` makes a same-day backup of `data/hypocxe.db`
 into `data/backups/` (one file per calendar day; a no-op if today's backup
@@ -49,15 +66,46 @@ already logs to — nothing extra to configure.
 pytest
 ```
 
+## Access control
+
+The whole app sits behind one shared passphrase (`engine/auth.py`, gated in
+`app.py` before `st.navigation` runs) — not per-user accounts:
+
+- **Setup.** `.streamlit/secrets.toml` (gitignored — never commit it) holds
+  only `app_passphrase_hash`, the SHA-256 hash of the passphrase; the
+  plaintext value itself is never stored or logged anywhere. See
+  `.streamlit/secrets.toml.example` for the exact command to generate a hash,
+  and the [Setup](#setup) section above.
+- **Rotating the passphrase.** Generate a new hash with the same command and
+  replace `app_passphrase_hash` in `.streamlit/secrets.toml` — every session
+  already logged in stays logged in (nothing checks the hash again mid-
+  session) but a fresh login needs the new passphrase.
+- **"Entered by."** Right after a successful login, a one-time prompt asks
+  who's using the app this session. It's stored only in that session's
+  `st.session_state["entered_by"]` — never a real account, never persisted
+  once the session ends — and is: (a) stamped onto `patients.entered_by`
+  when a case is saved and onto `analysis_runs.entered_by`/the export's
+  `RunInfo` sheet when a workbook is built, and (b) used to pre-fill (not
+  force-overwrite — it can still be edited) the "Your name" field wherever a
+  correction is recorded.
+- **What this is not.** A shared passphrase means anyone who has it can act
+  as anyone — there's no way to tell two people apart from the login alone
+  (that's what "Entered by" is for, on a good-faith basis, not an audit
+  guarantee). This is suitable **only** for a trusted-network deployment —
+  see PDPA / HN handling below — not a substitute for per-user accounts with
+  real authentication. If the clinic ever needs to know for certain who did
+  what, this isn't that.
+
 ## PDPA / HN handling
 
 The hospital number (HN) is the one field in this app that's directly
 identifying, so it's handled narrowly on purpose:
 
-- **Local network only.** There's no authentication layer and no expectation
-  of one — run this on a machine/network the clinic already controls access
-  to, the same way you would a shared spreadsheet on a department drive.
-  Don't expose the Streamlit server to the public internet.
+- **Local network only.** The [passphrase gate](#access-control) above is a
+  shared-secret speed bump, not real per-user authentication — run this on a
+  machine/network the clinic already controls access to (the hospital
+  network), the same way you would a shared spreadsheet on a department
+  drive. Don't expose the Streamlit server to the public internet.
 - **Masked by default.** Every on-screen table shows HN masked
   (`engine.export.mask_hn` — all but the last 4 digits) except Module 1
   (Patient Data), which has one explicit "Unmask HN" checkbox — off by
