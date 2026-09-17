@@ -118,7 +118,7 @@ class GoalResult(SQLModel, table=True):
     goal_text: str
     goal_type: str
     criteria: CriteriaDirection = Field(sa_column=_enum_column(CriteriaDirection))
-    acceptance_level: Optional[str] = None
+    acceptance_level: float
     parameter_value: float
     achieved_value: Optional[float] = None
     status: Optional[GoalStatus] = Field(default=None, sa_column=_enum_column(GoalStatus, nullable=True))

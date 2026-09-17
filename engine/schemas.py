@@ -80,11 +80,17 @@ class FormInput(BaseModel):
     and nothing else in the intake flow is positioned to supply them, so
     they're collected here too rather than guessed at save time — see
     CLAUDE.md rule 1 on not inventing values the manual should define.
+
+    hn is optional here (unlike engine.storage.Patient.hn, which is
+    NOT NULL): engine/parser.py's HN safeguard allows leaving it blank on
+    the form and auto-filling it from the uploaded files' filenames when
+    they all agree. Resolve it to a definite string (form-entered or
+    filename-derived) before constructing the Patient row.
     """
 
     model_config = ConfigDict(use_enum_values=False)
 
-    hn: str = Field(min_length=1)
+    hn: Optional[str] = Field(default=None, min_length=1)
     pt_no: str = Field(min_length=1)
     dose_regimen: DoseRegimen
     rx_cgy: float = Field(gt=0)
@@ -111,7 +117,15 @@ class FormInput(BaseModel):
 
 class GoalRow(BaseModel):
     """One evaluated goal for one plan (a row of engine.storage.GoalResult,
-    minus the id/plan_id assigned at save time)."""
+    minus the id/plan_id assigned at save time).
+
+    acceptance_level was originally modeled here as an optional qualitative
+    label — a guess flagged as unconfirmed pending the manual. Real pilot
+    exports (RayStation clinical-goal sheets) show it is always a required
+    numeric threshold compared directly against achieved_value (e.g. Criteria
+    AtMost + AcceptanceLevel 4820 + AchievedValue 4802.6 -> PASS), so it's
+    corrected to float here. See engine/parser.py §2.2 for how it's used.
+    """
 
     model_config = ConfigDict(use_enum_values=False)
 
@@ -122,7 +136,7 @@ class GoalRow(BaseModel):
     goal_text: str = Field(min_length=1)
     goal_type: str = Field(min_length=1)
     criteria: CriteriaDirection
-    acceptance_level: Optional[str] = None
+    acceptance_level: float
     parameter_value: float
     achieved_value: Optional[float] = None
     status: Optional[GoalStatus] = None

@@ -1,11 +1,91 @@
 # ROI alias map
 #
-# Maps the many spellings an ROI can carry in exported plans to one canonical
-# structure name used throughout the engine.
+# Maps the many spellings a NON-TARGET structure (an OAR, or BODY) can carry
+# in a RayStation clinical-goal export to one canonical name used throughout
+# the engine. Keys are the canonical name; each value lists the literal
+# spellings seen in exports that should map to it (matched case-insensitively
+# after whitespace/underscore/hyphen normalization).
 #
 #   <canonical name>:
 #     - <alias as it appears in exports>
+#     - ...
 #
-# Not yet populated.
+# What this file does NOT do: collapse different dose-level targets into one
+# name. "PTV44", "PTV45", "PTV-N55", "ITV45" etc. are distinct clinical
+# targets (elective vs. boost vs. nodal volumes in a SIB plan) and must stay
+# distinct — only their z-prefix / stray leading-token artifacts are cleaned
+# up (see engine/parser.py:normalize_roi_text), never their dose suffix.
+#
+# Source: inferred from real pilot RayStation exports plus the examples
+# given directly by the user (Bone/zBone/Bone Marrow -> Bone Marrow,
+# Kidney_L/Kidney Lt -> Kidney Lt). docs/analysis_manual_th_v2.md §2.2 is
+# not yet in this repo; once it is, reconcile this table against its
+# harmonisation table per CLAUDE.md rule 1 — this file is a best-effort
+# starting point, not a transcription of the manual.
 
-aliases: {}
+aliases:
+  Bone Marrow:
+    - Bone
+    - zBone
+    - Bone Marrow
+
+  Kidney Lt:
+    - Kidney_L
+    - Kidney Lt
+    - Kidney_Lt
+    - Kidney Left
+
+  Kidney Rt:
+    - Kidney_R
+    - Kidney Rt
+    - Kidney_Rt
+    - Kidney Right
+
+  Femoral Head Lt:
+    - Femur Head Lt
+    - Femoral Head Lt
+    - Femur_Head_L
+    - Femoral Head_L
+
+  Femoral Head Rt:
+    - Femur Head Rt
+    - Femoral Head Rt
+    - Femur_Head_R
+    - Femoral Head_R
+
+  Rectum:
+    - Rectum
+    - Rectum_new
+    - Rectum New
+
+  Small Bowel:
+    - Small Bowel
+    - SmallBowel
+    - Small_Bowel
+
+  Bowel Bag:
+    - Bowel
+    - Bowel Bag
+    - Bowel_Bag
+
+  Sigmoid:
+    - Sigmoid
+
+  Duodenum:
+    - Duodenum
+
+  Cauda Equina:
+    - Cauda Equina
+    - Cauda_Equina
+    - CaudaEquina
+
+  Spinal Cord:
+    - Spinal Cord
+    - SpinalCord
+    - Cord
+
+  BODY:
+    - BODY
+    - Body
+    - External
+    - Skin

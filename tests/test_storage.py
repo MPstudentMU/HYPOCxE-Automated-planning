@@ -39,7 +39,7 @@ def _goal(**overrides) -> GoalRow:
         goal_text="PTV V95% >= 95%",
         goal_type="V95%",
         criteria=CriteriaDirection.AT_LEAST,
-        acceptance_level=None,
+        acceptance_level=95.0,
         parameter_value=95.0,
         achieved_value=97.2,
         status=GoalStatus.PASS,
@@ -286,8 +286,8 @@ def test_goal_row_rejects_invalid_criteria_value():
     with pytest.raises(ValidationError):
         GoalRow(
             goal_key="g", priority=1, roi_raw="PTV", roi="PTV", goal_text="x",
-            goal_type="Dmax", criteria="NotADirection", parameter_value=1.0,
-            evaluable=True, structure_class=StructureClass.TARGET,
+            goal_type="Dmax", criteria="NotADirection", acceptance_level=1.0,
+            parameter_value=1.0, evaluable=True, structure_class=StructureClass.TARGET,
         )
 
 
