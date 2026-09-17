@@ -135,6 +135,15 @@ class UnrecognizedFileError(ParserError):
     (wide, per-plan Achieved_<Plan>) layout."""
 
 
+class UnreadableFileError(ParserError):
+    """The upload isn't a valid Excel workbook at all — wrong file type
+    (renamed to .xlsx), corrupted, or password-protected — as opposed to
+    UnrecognizedFileError, where the file opens fine but a sheet's layout
+    isn't one the parser knows. Raised by _read_workbook so the page layer
+    can give a specifically actionable message ("this isn't really an
+    Excel file") rather than the generic parse-failure one."""
+
+
 # --------------------------------------------------------------------------- #
 # Small pure helpers
 # --------------------------------------------------------------------------- #
@@ -552,7 +561,7 @@ def _read_workbook(name: str, content: bytes) -> dict[str, pd.DataFrame]:
     try:
         return pd.read_excel(io.BytesIO(content), sheet_name=None)
     except Exception as exc:
-        raise ParserError(f"{name}: cannot read as an Excel workbook ({exc})") from exc
+        raise UnreadableFileError(f"{name}: cannot read as an Excel workbook ({exc})") from exc
 
 
 def parse_workbook(name: str, content: bytes, *, form_pt_no: Optional[str],

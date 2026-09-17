@@ -247,6 +247,22 @@ def test_parse_case_files_rejects_mismatched_override_length():
                            plan_type_overrides=[PlanType.MANUAL, PlanType.AUTO])
 
 
+def test_wrong_file_type_raises_unreadable_file_error():
+    """A non-Excel upload (e.g. a renamed .csv/.txt) must raise the more
+    specific UnreadableFileError, not just the generic ParserError, so the
+    page layer can give a clearer message than pandas's own exception text."""
+    form = FormInput(hn="90000001", pt_no="Pt1", dose_regimen=DoseRegimen.HYPO, rx_cgy=4400,
+                     fractions=20, sib_boost=False, tx_room="R1", mp1="A", mp2="B", ro="C")
+    files = [("not_really.xlsx", b"this is not an excel file, just plain text")]
+    with pytest.raises(P.UnreadableFileError):
+        P.parse_case_files(files, form, plan_type_overrides=[PlanType.MANUAL])
+
+
+def test_unreadable_file_error_is_a_parser_error():
+    """Subclassing keeps any existing `except P.ParserError` catch-all working."""
+    assert issubclass(P.UnreadableFileError, P.ParserError)
+
+
 # --------------------------------------------------------------------------- #
 # Pt-column disagreement in a single-plan file
 # --------------------------------------------------------------------------- #

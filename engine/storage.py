@@ -22,6 +22,7 @@ real annotation objects at mapper-configure time; with postponed evaluation
 those annotations are plain strings and SQLAlchemy fails to parse the
 generic, raising "using a generic class as the argument to relationship()".
 """
+import shutil
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -60,6 +61,9 @@ __all__ = [
     "find_patient_by_pt_no",
     "update_patient",
     "load_analysis_frame",
+    "record_analysis_run",
+    "recent_activity",
+    "ensure_daily_backup",
 ]
 
 
@@ -429,3 +433,92 @@ def load_analysis_frame(engine: Engine) -> pd.DataFrame:
 
     assert "hn" not in df.columns, "HN must never enter the analysis frame — CLAUDE.md rule 4"
     return df
+
+
+# --------------------------------------------------------------------------- #
+# record_analysis_run / recent_activity / ensure_daily_backup
+# --------------------------------------------------------------------------- #
+
+
+def record_analysis_run(engine: Engine, *, engine_version: str, criteria_version: str,
+                        settings_json: str) -> int:
+    """Log one row to analysis_runs. engine/export.py calls this every
+    time it builds an export workbook, so every export is traceable to
+    exactly the engine/criteria version and settings that produced it."""
+    with Session(engine) as session:
+        try:
+            run = AnalysisRun(engine_version=engine_version, criteria_version=criteria_version,
+                              settings_json=settings_json)
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            return run.id
+        except Exception:
+            session.rollback()
+            raise
+
+
+def recent_activity(engine: Engine, *, limit: int = 20) -> pd.DataFrame:
+    """A unified, HN-free audit log for the sidebar: new-case saves
+    (Patient.created_at), corrections (GoalCorrection.corrected_at), and
+    analysis exports (AnalysisRun.timestamp) — most recent first. Derived
+    from tables that already record these events (no separate audit
+    table); patients are identified by pt_no only, never hn.
+    """
+    # LEFT OUTER, not inner: a re-upload (replace_plan) deletes the old
+    # goal_results row a superseded correction targeted, after flagging
+    # it superseded_by_upload — an inner join would silently drop that
+    # correction from the log instead of just losing its pt_no.
+    with Session(engine) as session:
+        patients = session.exec(select(Patient.pt_no, Patient.created_at)).all()
+        corrections = session.exec(
+            select(GoalCorrection.corrected_at, GoalCorrection.corrected_by,
+                  GoalCorrection.field, Patient.pt_no)
+            .select_from(GoalCorrection)
+            .join(GoalResult, GoalResult.id == GoalCorrection.goal_id, isouter=True)
+            .join(Plan, Plan.id == GoalResult.plan_id, isouter=True)
+            .join(Patient, Patient.id == Plan.patient_id, isouter=True)
+        ).all()
+        runs = session.exec(select(AnalysisRun.timestamp)).all()
+
+    rows = []
+    for pt_no, created_at in patients:
+        rows.append(dict(timestamp=created_at, action="New case", detail=pt_no))
+    for corrected_at, corrected_by, field, pt_no in corrections:
+        field_label = field.value if isinstance(field, Enum) else field
+        pt_no = pt_no or "a superseded goal"
+        rows.append(dict(timestamp=corrected_at, action="Correction",
+                         detail=f"{pt_no} · {field_label} · by {corrected_by}"))
+    for ts in runs:
+        rows.append(dict(timestamp=ts, action="Export", detail="Analysis workbook"))
+
+    df = pd.DataFrame(rows, columns=["timestamp", "action", "detail"])
+    if df.empty:
+        return df
+    return df.sort_values("timestamp", ascending=False).head(limit).reset_index(drop=True)
+
+
+def ensure_daily_backup(url: str = DEFAULT_DB_URL, *, backup_dir: Optional[Path] = None) -> Optional[Path]:
+    """Copy the live SQLite file into data/backups/ once per calendar day
+    (UTC), if today's backup doesn't already exist. A no-op for an
+    in-memory database (nothing to copy) or before the db file exists yet
+    (nothing to back up yet). This is a same-machine safety net against
+    an accidental delete/corruption during a session, not a substitute
+    for a real off-machine backup — see the README's local-network/PDPA
+    section.
+    """
+    if _is_memory_url(url) or not url.startswith("sqlite:///"):
+        return None
+    db_path = Path(url[len("sqlite:///"):])
+    if not db_path.exists():
+        return None
+
+    target_dir = backup_dir or (db_path.parent / "backups")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(timezone.utc).date().isoformat()
+    backup_path = target_dir / f"{db_path.stem}_{today}{db_path.suffix}"
+    if backup_path.exists():
+        return None  # already have today's backup
+
+    shutil.copy2(db_path, backup_path)
+    return backup_path

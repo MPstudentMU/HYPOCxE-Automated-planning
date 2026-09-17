@@ -25,6 +25,7 @@ values in front of whatever does (pass rate, scoring — Phases 3+).
 """
 from __future__ import annotations
 
+from enum import Enum
 from typing import Optional
 
 import pandas as pd
@@ -39,7 +40,7 @@ from engine.schemas import (
     CorrectionStatus,
     CriteriaDirection,
 )
-from engine.storage import GoalCorrection, GoalResult, load_analysis_frame
+from engine.storage import GoalCorrection, GoalResult, Patient, Plan, load_analysis_frame
 
 __all__ = [
     "CorrectionValidationError",
@@ -55,6 +56,7 @@ __all__ = [
     "copy_corrections_to_new_goal",
     "pending_count",
     "pending_count_by_patient",
+    "load_all_corrections",
 ]
 
 
@@ -359,3 +361,47 @@ def copy_corrections_to_new_goal(engine: Engine, *, source_goal_id: int, target_
             ))
         session.commit()
         return len(source_corrections)
+
+
+def load_all_corrections(engine: Engine) -> pd.DataFrame:
+    """Every goal_corrections row ever written, with enough context to be
+    readable on its own — patient (pt_no, never hn), plan, roi, goal_text
+    — for Module 9's DataCorrections export sheet and any other full
+    audit-trail view. Superseded corrections are included (flagged
+    superseded_by_upload=True) — an audit trail's job is completeness,
+    not just what's currently applied; see apply_corrections for that.
+
+    The joins to GoalResult/Plan/Patient are LEFT OUTER, not inner: a
+    re-upload (engine.storage.replace_plan) deletes the old goal_results
+    row a superseded correction targeted (after flagging it
+    superseded_by_upload — see _upsert_plan), so goal_id can point to a
+    row that no longer exists. An inner join would silently drop that
+    correction from the audit trail — exactly the history this function
+    exists to keep. pt_no/plan_type/roi/goal_text come back None for such
+    a row; the correction itself, and why it happened, doesn't.
+    """
+    columns = ["id", "field", "original_value", "corrected_value", "unit_entered",
+              "status", "source", "reason", "corrected_by", "corrected_at",
+              "superseded_by_upload", "pt_no", "plan_type", "roi", "goal_text"]
+    with Session(engine) as session:
+        rows = session.exec(
+            select(
+                GoalCorrection.id, GoalCorrection.field, GoalCorrection.original_value,
+                GoalCorrection.corrected_value, GoalCorrection.unit_entered,
+                GoalCorrection.status, GoalCorrection.source, GoalCorrection.reason,
+                GoalCorrection.corrected_by, GoalCorrection.corrected_at,
+                GoalCorrection.superseded_by_upload,
+                Patient.pt_no, Plan.plan_type, GoalResult.roi, GoalResult.goal_text,
+            )
+            .select_from(GoalCorrection)
+            .join(GoalResult, GoalResult.id == GoalCorrection.goal_id, isouter=True)
+            .join(Plan, Plan.id == GoalResult.plan_id, isouter=True)
+            .join(Patient, Patient.id == Plan.patient_id, isouter=True)
+            .order_by(GoalCorrection.corrected_at.desc())
+        ).all()
+
+    df = pd.DataFrame(rows, columns=columns)
+    for col in ("field", "status", "source", "plan_type"):
+        df[col] = df[col].map(lambda v: v.value if isinstance(v, Enum) else v)
+    assert "hn" not in df.columns, "HN must never enter the corrections audit trail — CLAUDE.md rule 4"
+    return df

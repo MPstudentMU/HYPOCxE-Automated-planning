@@ -129,6 +129,12 @@ if preview_clicked:
                     overwrite=bool(existing and overwrite),
                     existing_patient_id=existing.id if existing else None,
                 )
+            except P.UnreadableFileError as exc:
+                st.error(
+                    f"⚠️ That doesn't look like a valid Excel file: {exc}. Check that you "
+                    "selected the RayStation clinical-goal export (.xlsx) and not a renamed, "
+                    "corrupted, or password-protected file."
+                )
             except P.HNMismatchError as exc:
                 st.error(f"HN safeguard: {exc}")
             except P.ParserError as exc:

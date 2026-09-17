@@ -275,5 +275,7 @@ with st.expander(f"Goal-level scoring detail – {selection.label}"):
     st.dataframe(filter_goal_scores(goal_scores, selection),
                  width="stretch", hide_index=True)
 
-# Make the active filter available to the export page (RunInfo sheet)
+# Make the active filter available to the export page (RunInfo sheet, and
+# to rebuild the same PrioritySelection for M4_QualitySummary/Consistency)
 st.session_state["m4_priority_filter_label"] = selection.label
+st.session_state["m4_priority_filter_levels"] = selection.levels

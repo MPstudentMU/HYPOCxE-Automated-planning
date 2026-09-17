@@ -1,18 +1,28 @@
-"""Tests for engine/export.py (registry frame + HN masking) and the two
-registry charts in engine/charts.py."""
+"""Tests for engine/export.py (registry frame + HN masking, and the
+Module 9 multi-sheet workbook export) and the two registry charts in
+engine/charts.py."""
 from __future__ import annotations
 
+import io
+
+import pandas as pd
 import plotly.graph_objects as go
 import pytest
+from sqlmodel import Session, select
 
 from engine import charts as CH
 from engine import corrections as C
-from engine.export import load_registry_frame, mask_hn
+from engine import parser as P
+from engine.criteria_v0 import CRITERIA_SHA256, CRITERIA_VERSION, ENGINE_VERSION
+from engine.export import build_analysis_workbook, load_registry_frame, mask_hn
+from engine.priority_filter import PrioritySelection
 from engine.schemas import (
     CorrectionField, CorrectionSource, CorrectionStatus, CriteriaDirection,
     DoseRegimen, FormInput, GoalRow, GoalStatus, PlanFrame, PlanType, StructureClass,
 )
-from engine.storage import GoalResult, Plan, init_db, load_analysis_frame, save_case
+from engine.storage import AnalysisRun, GoalResult, Plan, init_db, load_analysis_frame, save_case
+
+FIXTURES = "tests/fixtures/pilot"
 
 
 def _form(**overrides):
@@ -179,3 +189,158 @@ def test_charts_have_single_axis_no_dual_axis(registry_df):
     """One measure (case count) -> one y-axis; never a second/secondary axis."""
     for fig in (CH.cases_per_regimen_chart(registry_df), CH.cases_per_planner_chart(registry_df)):
         assert "yaxis2" not in fig.to_dict()["layout"]
+
+
+# --------------------------------------------------------------------------- #
+# build_analysis_workbook — Module 9's one-workbook-per-run export
+# --------------------------------------------------------------------------- #
+
+
+def _export_form(**overrides) -> FormInput:
+    defaults = dict(hn="90000001", pt_no="Pt1", dose_regimen=DoseRegimen.HYPO, rx_cgy=4400,
+                    fractions=20, sib_boost=False, tx_room="R1", mp1="A", mp2="B", ro="C")
+    defaults.update(overrides)
+    return FormInput(**defaults)
+
+
+@pytest.fixture
+def pt1_pt5_engine():
+    """Real pilot fixtures: Pt1 has Manual+Auto (so pass-rate/scoring/DVH
+    all have something to compare), Pt5 has an Auto-only upload — enough
+    for every sheet to be non-trivially populated without being a slow,
+    full-cohort fixture set."""
+    engine = init_db("sqlite://")
+    parsed1 = P.parse_case_files([
+        f"{FIXTURES}/1clinical_goals_90000001_Manual.xlsx",
+        f"{FIXTURES}/1clinical_goals_90000001_Auto.xlsx",
+    ], _export_form(pt_no="Pt1", hn="90000001"))
+    save_case(engine, _export_form(pt_no="Pt1", hn="90000001"), parsed1.plan_frames)
+
+    parsed5 = P.parse_case_files([f"{FIXTURES}/5clinical_goals_90000005_auto.xlsx"],
+                                 _export_form(pt_no="Pt5", hn="90000005"))
+    save_case(engine, _export_form(pt_no="Pt5", hn="90000005"), parsed5.plan_frames)
+    return engine
+
+
+EXPECTED_SHEETS = [
+    "RunInfo", "M1_Patients", "M2_PassRate", "M2_Detail", "M3_Time",
+    "M4_QualitySummary", "M4_GoalScores", "M4_Consistency",
+    "M5_DVHConsistency", "Alerts", "DataCorrections",
+]
+
+
+def test_build_analysis_workbook_returns_bytes(pt1_pt5_engine):
+    workbook = build_analysis_workbook(pt1_pt5_engine)
+    assert isinstance(workbook, bytes)
+    assert len(workbook) > 0
+
+
+def test_build_analysis_workbook_has_every_sheet_in_order(pt1_pt5_engine):
+    workbook = build_analysis_workbook(pt1_pt5_engine)
+    xls = pd.ExcelFile(io.BytesIO(workbook), engine="openpyxl")
+    assert xls.sheet_names == EXPECTED_SHEETS
+
+
+def test_build_analysis_workbook_masks_hn_everywhere(pt1_pt5_engine):
+    """CLAUDE.md rule 4: HN never leaves the app unmasked. M1_Patients
+    shows only the masked form, and the raw HN string appears nowhere in
+    any sheet of the exported file."""
+    workbook = build_analysis_workbook(pt1_pt5_engine)
+    xls = pd.ExcelFile(io.BytesIO(workbook), engine="openpyxl")
+
+    m1 = xls.parse("M1_Patients")
+    assert set(m1["hn"]) == {"****0001", "****0005"}
+
+    for sheet in xls.sheet_names:
+        df = xls.parse(sheet)
+        as_text = df.astype(str)
+        assert not as_text.isin(["90000001", "90000005"]).any().any(), \
+            f"raw HN leaked into sheet {sheet!r}"
+
+
+def test_build_analysis_workbook_writes_one_analysis_run_row(pt1_pt5_engine):
+    with Session(pt1_pt5_engine) as session:
+        before = len(session.exec(select(AnalysisRun)).all())
+
+    build_analysis_workbook(pt1_pt5_engine)
+
+    with Session(pt1_pt5_engine) as session:
+        runs = session.exec(select(AnalysisRun)).all()
+    assert len(runs) == before + 1
+    run = runs[-1]
+    assert run.engine_version == ENGINE_VERSION
+    assert run.criteria_version == CRITERIA_VERSION.upper()
+
+
+def test_build_analysis_workbook_run_info_has_version_and_hash(pt1_pt5_engine):
+    workbook = build_analysis_workbook(pt1_pt5_engine)
+    xls = pd.ExcelFile(io.BytesIO(workbook), engine="openpyxl")
+    run_info = xls.parse("RunInfo").set_index("field")["value"]
+
+    assert run_info["Engine version"] == ENGINE_VERSION
+    assert run_info["Criteria version"] == "V0"  # displayed uppercase, per the request
+    assert run_info["Criteria SHA-256"] == CRITERIA_SHA256
+    assert run_info["Active priority filter (M4)"] == "All Priorities"
+    assert bool(run_info["Pass rate: exclude non-evaluable goals"]) is True
+    assert "Export timestamp (UTC)" in run_info.index
+
+
+def test_build_analysis_workbook_criteria_version_constant_is_lowercase():
+    """The stored constant must stay lowercase 'v0' — the pinned
+    CRITERIA_SHA256 is computed over it (engine/criteria_v0.py, CLAUDE.md
+    rule 2). Only the RunInfo *display* is uppercased."""
+    assert CRITERIA_VERSION == "v0"
+
+
+def test_build_analysis_workbook_priority_selection_changes_m4_quality_summary(pt1_pt5_engine):
+    all_workbook = build_analysis_workbook(pt1_pt5_engine, priority_selection=PrioritySelection.all())
+    p1_workbook = build_analysis_workbook(pt1_pt5_engine, priority_selection=PrioritySelection((1,)))
+
+    all_qi = pd.ExcelFile(io.BytesIO(all_workbook), engine="openpyxl").parse("M4_QualitySummary")
+    p1_qi = pd.ExcelFile(io.BytesIO(p1_workbook), engine="openpyxl").parse("M4_QualitySummary")
+
+    all_run_info = pd.ExcelFile(io.BytesIO(all_workbook), engine="openpyxl") \
+        .parse("RunInfo").set_index("field")["value"]
+    p1_run_info = pd.ExcelFile(io.BytesIO(p1_workbook), engine="openpyxl") \
+        .parse("RunInfo").set_index("field")["value"]
+    assert all_run_info["Active priority filter (M4)"] == "All Priorities"
+    assert p1_run_info["Active priority filter (M4)"] == "Priority 1"
+
+    assert not all_qi["n_goals"].equals(p1_qi["n_goals"])
+
+
+def test_build_analysis_workbook_m4_goal_scores_is_unfiltered_by_priority(pt1_pt5_engine):
+    """M4_GoalScores is the raw compute_goal_scores() output — every goal,
+    regardless of the M4_QualitySummary priority filter."""
+    all_workbook = build_analysis_workbook(pt1_pt5_engine, priority_selection=PrioritySelection.all())
+    p1_workbook = build_analysis_workbook(pt1_pt5_engine, priority_selection=PrioritySelection((1,)))
+
+    all_scores = pd.ExcelFile(io.BytesIO(all_workbook), engine="openpyxl").parse("M4_GoalScores")
+    p1_scores = pd.ExcelFile(io.BytesIO(p1_workbook), engine="openpyxl").parse("M4_GoalScores")
+    assert len(all_scores) == len(p1_scores)
+
+
+def test_build_analysis_workbook_data_corrections_sheet_reflects_corrections(pt1_pt5_engine):
+    df = load_analysis_frame(pt1_pt5_engine)
+    bone_id = int(df.loc[df["roi"] == "Bone Marrow", "goal_id"].iloc[0])
+    C.record_correction(pt1_pt5_engine, goal_id=bone_id, field=CorrectionField.ACHIEVED_VALUE,
+                        status=CorrectionStatus.CORRECTED, source=CorrectionSource.RAYSTATION_DVH,
+                        reason="measured", corrected_by="Dr. Test", corrected_value_display=800.0)
+
+    workbook = build_analysis_workbook(pt1_pt5_engine)
+    corrections = pd.ExcelFile(io.BytesIO(workbook), engine="openpyxl").parse("DataCorrections")
+    assert len(corrections) == 1
+    assert corrections.iloc[0]["corrected_by"] == "Dr. Test"
+
+
+def test_build_analysis_workbook_pass_rate_settings_override(pt1_pt5_engine):
+    default_workbook = build_analysis_workbook(pt1_pt5_engine)
+    matched_workbook = build_analysis_workbook(
+        pt1_pt5_engine, pass_rate_settings=dict(matched_goals_only=True))
+
+    default_info = pd.ExcelFile(io.BytesIO(default_workbook), engine="openpyxl") \
+        .parse("RunInfo").set_index("field")["value"]
+    matched_info = pd.ExcelFile(io.BytesIO(matched_workbook), engine="openpyxl") \
+        .parse("RunInfo").set_index("field")["value"]
+    assert bool(default_info["Pass rate: matched goals only"]) is False
+    assert bool(matched_info["Pass rate: matched goals only"]) is True
