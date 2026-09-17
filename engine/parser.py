@@ -1,19 +1,20 @@
 """RayStation clinical-goal export parser.
 
-Implements the intake-parsing rules from docs/analysis_manual_th_v2.md §2.2:
-Format A (one file per plan, one row per clinical goal — the standard
-RayStation export) and Format B (one combined workbook holding several
-plans, either as several Format-A-shaped sheets or as one sheet with wide
-Achieved_<Plan> / Status_<Plan> columns).
+Implements the intake-parsing rules from docs/analysis_manual_th_v2.md §2.2
+and §2.4: Format A (one file per plan, one row per clinical goal — the
+standard RayStation export) and Format B (one combined workbook holding
+several plans, either as several Format-A-shaped sheets or as one sheet
+with wide Achieved_<Plan> / Status_<Plan> columns).
 
-NOTE ON PROVENANCE — docs/analysis_manual_th_v2.md is not yet in this repo
-(see docs/README.md). This module implements the rules exactly as specified
-in the task given to Claude Code, cross-checked against the *structure* of
-real pilot RayStation exports found on disk (column names, sheet-name
-truncation, the Pt5 63-duplicate-row fact) without copying those files'
-content (which carry real hospital numbers) into the repository — see
-tests/fixtures/pilot/ for the de-identified synthetic fixtures used instead,
-and CLAUDE.md rule 1: reconcile this file against the manual once it exists.
+NOTE ON PROVENANCE — this module was originally built before the manual
+was in this repo, cross-checked only against the *structure* of real pilot
+RayStation exports found on disk (column names, sheet-name truncation, the
+Pt5 63-duplicate-row fact) without copying those files' content (which
+carry real hospital numbers) — see tests/fixtures/pilot/ for the
+de-identified synthetic fixtures used instead. Now that the manual is
+present, it has been reconciled against §2.4's ROI harmonisation table
+(see canonical_roi) per CLAUDE.md rule 1; the rest of this module's
+behavior was already consistent with it.
 
 Pipeline, per file:
   1. read every sheet
@@ -25,8 +26,9 @@ Pipeline, per file:
      (falling back to the filename if a single-plan file's Pt column
      disagrees with itself)
   6. coerce numeric columns, standardize ROI, compute Status if absent
-  7. drop exact duplicate rows, exclude "no priority" sentinel rows,
-     compute goal_key / structure_class / evaluable
+  7. drop exact duplicate rows, normalize a "no priority" sentinel to None
+     (kept, not dropped — reviewable via engine/corrections.py), compute
+     goal_key / structure_class / evaluable
 
 Then, across all files for one case: the HN safeguard, and grouping into
 PlanFrames ready for engine.storage.save_case.
@@ -104,6 +106,7 @@ _REQUIRED_BASE_COLUMNS = {
 _NON_GOAL_SHEET_NAMES = {"planningtime", "time", "times", "registry", "patients"}
 
 _TARGET_PREFIX_RE = re.compile(r"^(PTV|ITV|CTV|GTV)", re.IGNORECASE)
+_NODAL_SUFFIX_RE = re.compile(r"^[\s_-]*n(?![a-zA-Z])", re.IGNORECASE)
 _HN_RE = re.compile(r"(?<!\d)(\d{7,9})(?!\d)")
 _LEADING_ORDINAL_RE = re.compile(r"^\s*\d+\s+(?=\S)")  # stray "1 " export artifact
 _LEADING_Z_RE = re.compile(r"^z(?=[A-Za-z])")  # RayStation "duplicated structure" prefix
@@ -179,9 +182,7 @@ def normalize_plan_token(text) -> Optional[PlanType]:
 def normalize_roi_text(raw: str) -> str:
     """Strip export artifacts that are never part of the clinical name: a
     stray leading ordinal ('1 ITV45' -> 'ITV45') and RayStation's 'z' prefix
-    for a duplicated/backup structure ('zBone' -> 'Bone'). Never touches a
-    dose suffix (PTV44 stays PTV44) — only reference/roi_aliases.yaml does
-    further canonicalisation, and only for non-target structures."""
+    for a duplicated/backup structure ('zBone' -> 'Bone')."""
     text = str(raw).strip()
     text = _LEADING_ORDINAL_RE.sub("", text)
     text = _LEADING_Z_RE.sub("", text)
@@ -203,10 +204,28 @@ def _roi_alias_map() -> dict[str, str]:
 
 def canonical_roi(raw: str) -> str:
     """The standardized ROI name used in goal_key / structure_class /
-    cross-plan comparisons: artifact-stripped, then alias-mapped for
-    non-target structures. A name not in the alias table (every
-    dose-specific target name included) passes through unchanged."""
+    cross-plan comparisons.
+
+    Per docs/analysis_manual_th_v2.md §2.4's ROI harmonisation table, a
+    target (PTV/ITV/CTV/GTV) collapses to just its base type — every dose
+    suffix and export quirk dropped ('PTV45'/'PTV 44'/'1 PTV45' -> 'PTV',
+    'ITV-T LR'/'zITV' -> 'ITV') — except a nodal boost marker, which keeps
+    its own bucket ('PTV-N55' -> 'PTV-N'). A patient is only ever on one
+    dose regimen, so "PTV45" and "PTV44" never coexist for the same
+    patient; the suffix is regimen-dependent noise, not a second target.
+    (Phase 2 originally kept dose suffixes distinct, reasoning they could
+    be different SIB targets — corrected once the manual, unavailable at
+    the time, confirmed otherwise. See CLAUDE.md rule 1.)
+
+    Non-target structures go through reference/roi_aliases.yaml instead,
+    for their own (exact-string) spelling variants.
+    """
     normalized = normalize_roi_text(raw)
+    target_match = _TARGET_PREFIX_RE.match(normalized)
+    if target_match:
+        target_type = target_match.group(1).upper()
+        remainder = normalized[target_match.end():]
+        return f"{target_type}-N" if _NODAL_SUFFIX_RE.match(remainder) else target_type
     return _roi_alias_map().get(normalized.lower(), normalized)
 
 

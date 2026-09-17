@@ -10,18 +10,21 @@
 #     - <alias as it appears in exports>
 #     - ...
 #
-# What this file does NOT do: collapse different dose-level targets into one
-# name. "PTV44", "PTV45", "PTV-N55", "ITV45" etc. are distinct clinical
-# targets (elective vs. boost vs. nodal volumes in a SIB plan) and must stay
-# distinct — only their z-prefix / stray leading-token artifacts are cleaned
-# up (see engine/parser.py:normalize_roi_text), never their dose suffix.
+# What this file does NOT do: canonicalize a target (PTV/ITV/CTV/GTV). Per
+# docs/analysis_manual_th_v2.md §2.4's harmonisation table, a target
+# collapses to just its base type regardless of dose suffix or export
+# quirk ("PTV45"/"PTV 44"/"1 PTV45" -> "PTV", "ITV-T LR"/"zITV" -> "ITV"),
+# except a nodal boost marker keeps its own bucket ("PTV-N55" -> "PTV-N")
+# — a general rule handled in code (engine/parser.py:canonical_roi), not
+# an exact-string table, since a patient is only ever on one dose regimen
+# (the dose suffix is regimen-dependent noise, never a second coexisting
+# target for the same patient).
 #
-# Source: inferred from real pilot RayStation exports plus the examples
-# given directly by the user (Bone/zBone/Bone Marrow -> Bone Marrow,
-# Kidney_L/Kidney Lt -> Kidney Lt). docs/analysis_manual_th_v2.md §2.2 is
-# not yet in this repo; once it is, reconcile this table against its
-# harmonisation table per CLAUDE.md rule 1 — this file is a best-effort
-# starting point, not a transcription of the manual.
+# Source: docs/analysis_manual_th_v2.md §2.4's ROI harmonisation table,
+# for every entry it lists. A few non-target entries below it doesn't
+# mention (e.g. Sigmoid, Duodenum, Cauda Equina, Spinal Cord, BODY) are
+# carried over unchanged, since real pilot exports show no spelling
+# variants for them.
 
 aliases:
   Bone Marrow:

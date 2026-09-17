@@ -338,17 +338,37 @@ def test_format_b_computes_status_for_plan_with_no_status_column():
     ("Femur Head Lt", "Femoral Head Lt"),
     ("Rectum_new", "Rectum"),
     ("SmallBowel", "Small Bowel"),
-    ("1 ITV45", "ITV45"),          # stray ordinal stripped, dose suffix kept
-    ("PTV45", "PTV45"),            # distinct dose-level target: untouched
-    ("PTV44", "PTV44"),            # a different target: must stay distinct
-    ("PTV-N55", "PTV-N55"),        # nodal boost target: untouched
+    # Targets collapse to their base type per docs/analysis_manual_th_v2.md
+    # §2.4's harmonisation table — a patient is only ever on one dose
+    # regimen, so a dose suffix is regimen noise, never a second target.
+    ("1 ITV45", "ITV"),
+    ("ITV45", "ITV"),
+    ("zITV", "ITV"),
+    ("ITV-T LR", "ITV"),
+    ("PTV45", "PTV"),
+    ("PTV 45", "PTV"),
+    ("PTV44", "PTV"),
+    ("PTV 44", "PTV"),
+    ("1 PTV45", "PTV"),
+    ("CTV P", "CTV"),
+    # ...except a nodal boost marker, which keeps its own bucket.
+    ("PTV-N55", "PTV-N"),
+    ("1 PTV-N55", "PTV-N"),
+    ("GTV-N 55", "GTV-N"),
 ])
 def test_canonical_roi(raw, expected):
     assert P.canonical_roi(raw) == expected
 
 
-def test_canonical_roi_does_not_collapse_different_dose_targets():
-    assert P.canonical_roi("PTV44") != P.canonical_roi("PTV45")
+def test_canonical_roi_collapses_same_patient_dose_variants():
+    """PTV44 and PTV45 never coexist for one patient (each is on exactly
+    one dose regimen) — the suffix is noise the manual says to drop, not a
+    second target to keep distinct."""
+    assert P.canonical_roi("PTV44") == P.canonical_roi("PTV45") == "PTV"
+
+
+def test_canonical_roi_keeps_nodal_boost_distinct_from_primary_target():
+    assert P.canonical_roi("PTV-N55") != P.canonical_roi("PTV45")
 
 
 @pytest.mark.parametrize("roi,expected", [
