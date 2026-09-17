@@ -473,3 +473,118 @@ def test_parsed_case_round_trips_through_storage_without_hn():
     assert "hn" not in df.columns
     assert set(df["plan_type"]) == {"Manual", "Auto", "Auto+Manual"}
     assert len(df) == sum(len(pf.goals) for pf in parsed.plan_frames)
+
+
+# --------------------------------------------------------------------------- #
+# detect_plan_type — best-effort per-file detection for
+# pages/0_new_case.py's multi-file uploader (Plan column -> sheet name ->
+# filename suffix, same cascade _resolve_plan applies per sheet)
+# --------------------------------------------------------------------------- #
+
+
+def _bytes(name: str) -> bytes:
+    with open(_fixture_path(name), "rb") as f:
+        return f.read()
+
+
+def _workbook_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
+    import io
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    return buffer.getvalue()
+
+
+def test_detect_plan_type_from_plan_column():
+    """1clinical_goals_90000001_Manual.xlsx has a Plan column ('Manual')
+    and no filename/sheet-name suffix hint at all beyond that."""
+    result = P.detect_plan_type(
+        "1clinical_goals_90000001_Manual.xlsx",
+        _bytes("1clinical_goals_90000001_Manual.xlsx"),
+    )
+    assert result == PlanType.MANUAL
+
+
+def test_detect_plan_type_from_sheet_name_when_no_plan_column():
+    """1clinical_goals_90000001_Auto.xlsx has no Plan column — the sheet
+    name ('...90000001_Auto') is what resolves it."""
+    result = P.detect_plan_type(
+        "1clinical_goals_90000001_Auto.xlsx",
+        _bytes("1clinical_goals_90000001_Auto.xlsx"),
+    )
+    assert result == PlanType.AUTO
+
+
+def test_detect_plan_type_from_truncated_sheet_name():
+    """1clinical_goals_90000001_case.xlsx: sheet name truncated to Excel's
+    31-char limit ('..._Auto+M') is the only usable signal — the filename
+    itself ('..._case.xlsx') gives no hint."""
+    result = P.detect_plan_type(
+        "1clinical_goals_90000001_case.xlsx",
+        _bytes("1clinical_goals_90000001_case.xlsx"),
+    )
+    assert result == PlanType.AUTO_MANUAL
+
+
+def test_detect_plan_type_from_filename_suffix_lowercase():
+    """5clinical_goals_90000005_auto.xlsx: lower-case filename suffix,
+    also mirrored in its sheet name, so either signal alone would work."""
+    result = P.detect_plan_type(
+        "5clinical_goals_90000005_auto.xlsx",
+        _bytes("5clinical_goals_90000005_auto.xlsx"),
+    )
+    assert result == PlanType.AUTO
+
+
+def test_detect_plan_type_returns_none_for_combined_format_b_file():
+    """6clinical_goals_90000006_combined.xlsx has no Plan column, and
+    neither its sheet name ('...comb', truncated) nor its filename
+    ('...combined.xlsx') contain a Manual/Auto/Auto+Manual token — a real
+    Format B file legitimately holds all three plans, so there's no single
+    type to detect; the page must ask, not guess."""
+    result = P.detect_plan_type(
+        "6clinical_goals_90000006_combined.xlsx",
+        _bytes("6clinical_goals_90000006_combined.xlsx"),
+    )
+    assert result is None
+
+
+def test_detect_plan_type_returns_none_for_unreadable_file():
+    result = P.detect_plan_type("not_really.xlsx", b"this is not an excel file")
+    assert result is None
+
+
+def test_detect_plan_type_returns_none_when_sheets_disagree():
+    """Two goal-bearing sheets whose names resolve to different plan
+    types — don't guess, even though each sheet individually is
+    resolvable."""
+    goal_cols = dict(Priority=[1], ROI=["Bladder"], Goal=["x"], GoalType=["DoseAtVolume"],
+                     Criteria=["AtMost"], AcceptanceLevel=[100.0], ParameterValue=[0.0])
+    content = _workbook_bytes({
+        "CaseManual": pd.DataFrame(goal_cols),
+        "CaseAuto": pd.DataFrame(goal_cols),
+    })
+    result = P.detect_plan_type("ambiguous.xlsx", content)
+    assert result is None
+
+
+def test_detect_plan_type_returns_none_with_no_signal_at_all():
+    goal_cols = dict(Priority=[1], ROI=["Bladder"], Goal=["x"], GoalType=["DoseAtVolume"],
+                     Criteria=["AtMost"], AcceptanceLevel=[100.0], ParameterValue=[0.0])
+    content = _workbook_bytes({"Sheet1": pd.DataFrame(goal_cols)})
+    result = P.detect_plan_type("upload.xlsx", content)
+    assert result is None
+
+
+def test_detect_plan_type_skips_non_goal_sheets():
+    """A 'Registry'/'PlanningTime'-style incidental sheet must not feed a
+    false signal into detection, same as it's skipped during real parsing."""
+    goal_cols = dict(Priority=[1], ROI=["Bladder"], Goal=["x"], GoalType=["DoseAtVolume"],
+                     Criteria=["AtMost"], AcceptanceLevel=[100.0], ParameterValue=[0.0])
+    content = _workbook_bytes({
+        "Registry": pd.DataFrame({"Note": ["Auto plan notes"]}),
+        "CaseManual": pd.DataFrame(goal_cols),
+    })
+    result = P.detect_plan_type("upload.xlsx", content)
+    assert result == PlanType.MANUAL

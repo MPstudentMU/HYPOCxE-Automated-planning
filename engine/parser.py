@@ -72,6 +72,7 @@ __all__ = [
     "make_goal_key",
     "compute_status",
     "normalize_plan_token",
+    "detect_plan_type",
     "hn_from_filename",
     "patient_no_from_text",
     "NO_PRIORITY_SENTINEL",
@@ -562,6 +563,57 @@ def _read_workbook(name: str, content: bytes) -> dict[str, pd.DataFrame]:
         return pd.read_excel(io.BytesIO(content), sheet_name=None)
     except Exception as exc:
         raise UnreadableFileError(f"{name}: cannot read as an Excel workbook ({exc})") from exc
+
+
+def detect_plan_type(name: str, content: bytes) -> Optional[PlanType]:
+    """Best-effort plan-type detection for one uploaded file, for UI use
+    before the user has committed it to a Manual/Auto/Auto+Manual slot
+    (pages/0_new_case.py's multi-file uploader) — NOT used during real
+    parsing, which instead trusts an explicit plan_type_override once a
+    type has been decided (by this detection, or by the user resolving a
+    conflict/unknown in the UI).
+
+    Applies the same cascade _parse_goal_sheet/_resolve_plan apply per
+    sheet during real parsing — a Plan column's value, then the sheet
+    name, then the filename — but at the whole-file level: every
+    goal-bearing sheet must agree (or supply no signal at all) for a
+    result to come back.
+
+    Returns None — "couldn't determine it, don't guess" — for an
+    unreadable file, a file with no goal-bearing sheet giving any signal,
+    or sheets whose Plan column/sheet name disagree with each other.
+    Never raises: the real parse_case_files() call (once the user has
+    confirmed a type for every file) is what raises for a genuinely bad
+    upload; this is only ever a hint.
+    """
+    try:
+        book = _read_workbook(name, content)
+    except ParserError:
+        return None
+
+    candidates: set[PlanType] = set()
+    for sheet_name, sheet_df in book.items():
+        if re.sub(r"[\s_]", "", str(sheet_name)).lower() in _NON_GOAL_SHEET_NAMES:
+            continue
+
+        plan = None
+        df = _normalize_columns(sheet_df)
+        if "Plan" in df.columns and df["Plan"].notna().any():
+            resolved = {normalize_plan_token(v) for v in df["Plan"].dropna().unique()}
+            resolved.discard(None)
+            if len(resolved) == 1:
+                plan = next(iter(resolved))
+        if plan is None:
+            plan = normalize_plan_token(sheet_name)
+        if plan is not None:
+            candidates.add(plan)
+
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if len(candidates) > 1:
+        return None  # sheets disagree with each other -- don't guess
+
+    return normalize_plan_token(name)
 
 
 def parse_workbook(name: str, content: bytes, *, form_pt_no: Optional[str],
