@@ -87,9 +87,9 @@ def _frame(plan_type: PlanType, goals=None, **overrides) -> PlanFrame:
 # --------------------------------------------------------------------------- #
 
 
-def test_init_db_creates_all_four_tables(engine):
+def test_init_db_creates_all_tables(engine):
     table_names = set(engine.dialect.get_table_names(engine.connect()))
-    assert table_names == {"patients", "plans", "goal_results", "analysis_runs"}
+    assert table_names == {"patients", "plans", "goal_results", "goal_corrections", "analysis_runs"}
 
 
 def test_init_db_is_idempotent(engine):
@@ -280,6 +280,13 @@ def test_goal_row_rejects_invalid_priority():
         _goal(priority=4)
     with pytest.raises(ValidationError):
         _goal(priority=0)
+
+
+def test_goal_row_allows_none_priority():
+    """None means "not yet known" (RayStation's no-priority sentinel, or a
+    pending correction) — kept so it can be reviewed, not rejected."""
+    goal = _goal(priority=None)
+    assert goal.priority is None
 
 
 def test_goal_row_rejects_invalid_criteria_value():

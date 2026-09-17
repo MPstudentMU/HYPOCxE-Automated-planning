@@ -27,7 +27,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from sqlalchemy import Column
+from sqlalchemy import Column, delete
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
@@ -36,6 +36,9 @@ import pandas as pd
 
 from engine.config import DEFAULT_DB_URL
 from engine.schemas import (
+    CorrectionField,
+    CorrectionSource,
+    CorrectionStatus,
     CriteriaDirection,
     DoseRegimen,
     FormInput,
@@ -49,9 +52,13 @@ __all__ = [
     "Patient",
     "Plan",
     "GoalResult",
+    "GoalCorrection",
     "AnalysisRun",
     "init_db",
     "save_case",
+    "replace_plan",
+    "find_patient_by_pt_no",
+    "update_patient",
     "load_analysis_frame",
 ]
 
@@ -112,7 +119,11 @@ class GoalResult(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     plan_id: int = Field(foreign_key="plans.id", index=True)
     goal_key: str = Field(index=True)
-    priority: int
+    # Nullable: RayStation's "no priority" sentinel (engine/parser.py) is
+    # normalized to None and the row is kept, not dropped, so it can be
+    # reviewed and corrected (engine/corrections.py) instead of silently
+    # vanishing from goal_results.
+    priority: Optional[int] = None
     roi_raw: str
     roi: str
     goal_text: str
@@ -126,6 +137,38 @@ class GoalResult(SQLModel, table=True):
     structure_class: StructureClass = Field(sa_column=_enum_column(StructureClass))
 
     plan: Optional[Plan] = Relationship(back_populates="goal_results")
+    corrections: List["GoalCorrection"] = Relationship(back_populates="goal")
+
+
+class GoalCorrection(SQLModel, table=True):
+    """A manual correction to one field of one goal_results row, per the
+    Module 0/8 correction workflow. engine/corrections.py is the only code
+    that should write here or read this to build a corrected analysis
+    frame — see that module's docstring. goal_results itself is never
+    modified; a correction is always an overlay applied at analysis time.
+    """
+    __tablename__ = "goal_corrections"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    goal_id: int = Field(foreign_key="goal_results.id", index=True)
+    field: CorrectionField = Field(sa_column=_enum_column(CorrectionField))
+    # Stored as text regardless of the underlying field's real type (float
+    # for AchievedValue, int for Priority) since one column has to hold
+    # both; engine/corrections.py parses back to the right type on read.
+    original_value: Optional[str] = None
+    corrected_value: Optional[str] = None
+    unit_entered: Optional[str] = None
+    status: CorrectionStatus = Field(sa_column=_enum_column(CorrectionStatus))
+    source: CorrectionSource = Field(sa_column=_enum_column(CorrectionSource))
+    reason: str
+    corrected_by: str
+    corrected_at: datetime = Field(default_factory=_utcnow)
+    # True once a re-upload replaces the goal_results row this correction
+    # targeted — the correction stays in the table (audit trail), it just
+    # stops being applied. See engine.storage.replace_plan.
+    superseded_by_upload: bool = False
+
+    goal: Optional[GoalResult] = Relationship(back_populates="corrections")
 
 
 class AnalysisRun(SQLModel, table=True):
@@ -171,6 +214,67 @@ def init_db(url: str = DEFAULT_DB_URL) -> Engine:
 # --------------------------------------------------------------------------- #
 
 
+def _upsert_plan(session: Session, patient_id: int, frame: PlanFrame) -> int:
+    """Insert a plan for patient_id, or — if one of the same plan_type
+    already exists (a re-upload) — replace its goal_results with the new
+    frame's. Any still-active correction targeting a replaced goal is
+    marked superseded_by_upload=True (kept for the audit trail, no longer
+    applied) rather than deleted. Must run inside an open transaction;
+    raises and leaves cleanup to the caller on failure. Returns the plan id.
+    """
+    existing = session.exec(
+        select(Plan).where(Plan.patient_id == patient_id, Plan.plan_type == frame.plan_type)
+    ).first()
+
+    if existing is None:
+        plan = Plan(
+            patient_id=patient_id,
+            plan_type=frame.plan_type,
+            planning_time_min=frame.planning_time_min,
+            is_straight_pass=frame.is_straight_pass,
+            source_filename=frame.source_filename,
+            file_sha256=frame.file_sha256,
+        )
+        session.add(plan)
+        session.flush()
+        plan_id = plan.id
+    else:
+        old_goal_ids = session.exec(
+            select(GoalResult.id).where(GoalResult.plan_id == existing.id)
+        ).all()
+        if old_goal_ids:
+            stale_corrections = session.exec(
+                select(GoalCorrection)
+                .where(GoalCorrection.goal_id.in_(old_goal_ids))
+                .where(GoalCorrection.superseded_by_upload == False)  # noqa: E712
+            ).all()
+            for correction in stale_corrections:
+                correction.superseded_by_upload = True
+                session.add(correction)
+            session.flush()  # write the supersede flags before the goals disappear
+
+            # A bulk DELETE, not session.delete(obj): the ORM relationship
+            # would otherwise try to null out goal_corrections.goal_id for
+            # every row that references a deleted goal (its default
+            # one-to-many cascade), which violates that column's NOT NULL
+            # constraint — and would erase exactly the history we just
+            # flagged superseded_by_upload to preserve.
+            session.exec(delete(GoalResult).where(GoalResult.id.in_(old_goal_ids)))
+
+        existing.planning_time_min = frame.planning_time_min
+        existing.is_straight_pass = frame.is_straight_pass
+        existing.source_filename = frame.source_filename
+        existing.file_sha256 = frame.file_sha256
+        session.add(existing)
+        session.flush()
+        plan_id = existing.id
+
+    for goal in frame.goals:
+        session.add(GoalResult(plan_id=plan_id, **goal.model_dump()))
+
+    return plan_id
+
+
 def save_case(engine: Engine, form: FormInput, plan_frames: Sequence[PlanFrame]) -> int:
     """Persist one case (a patient plus one or more plans and their goal
     results) as a single transaction. Returns the new patient's id.
@@ -197,22 +301,58 @@ def save_case(engine: Engine, form: FormInput, plan_frames: Sequence[PlanFrame])
             session.flush()  # assigns patient.id without ending the transaction
 
             for frame in plan_frames:
-                plan = Plan(
-                    patient_id=patient.id,
-                    plan_type=frame.plan_type,
-                    planning_time_min=frame.planning_time_min,
-                    is_straight_pass=frame.is_straight_pass,
-                    source_filename=frame.source_filename,
-                    file_sha256=frame.file_sha256,
-                )
-                session.add(plan)
-                session.flush()  # assigns plan.id
-
-                for goal in frame.goals:
-                    session.add(GoalResult(plan_id=plan.id, **goal.model_dump()))
+                _upsert_plan(session, patient.id, frame)
 
             session.commit()
             return patient.id
+        except Exception:
+            session.rollback()
+            raise
+
+
+def replace_plan(engine: Engine, patient_id: int, plan_frame: PlanFrame) -> int:
+    """Add a plan to an existing patient, or replace it (a re-upload) if
+    one of that plan_type already exists — see _upsert_plan. Returns the
+    plan id.
+    """
+    with Session(engine) as session:
+        try:
+            plan_id = _upsert_plan(session, patient_id, plan_frame)
+            session.commit()
+            return plan_id
+        except Exception:
+            session.rollback()
+            raise
+
+
+def find_patient_by_pt_no(engine: Engine, pt_no: str) -> Optional[Patient]:
+    """Look up an existing patient — used by the intake page to decide
+    whether an upload is a new case (save_case) or a re-upload for an
+    existing one (update_patient + replace_plan per plan)."""
+    with Session(engine) as session:
+        return session.exec(select(Patient).where(Patient.pt_no == pt_no)).first()
+
+
+def update_patient(engine: Engine, patient_id: int, form: FormInput) -> None:
+    """Update an existing patient's intake fields in place (a re-upload
+    that also corrects the case's metadata). Does not touch its plans —
+    see replace_plan for that."""
+    with Session(engine) as session:
+        try:
+            patient = session.get(Patient, patient_id)
+            if patient is None:
+                raise ValueError(f"No such patient (id={patient_id})")
+            patient.hn = form.hn
+            patient.dose_regimen = form.dose_regimen
+            patient.rx_cgy = form.rx_cgy
+            patient.fractions = form.fractions
+            patient.sib_boost = form.sib_boost
+            patient.tx_room = form.tx_room
+            patient.mp1 = form.mp1
+            patient.mp2 = form.mp2
+            patient.ro = form.ro
+            session.add(patient)
+            session.commit()
         except Exception:
             session.rollback()
             raise
@@ -226,7 +366,7 @@ _ANALYSIS_COLUMNS = [
     "pt_no", "dose_regimen", "rx_cgy", "fractions", "sib_boost",
     "tx_room", "mp1", "mp2", "ro",
     "plan_id", "plan_type", "planning_time_min", "is_straight_pass", "source_filename",
-    "goal_key", "priority", "roi_raw", "roi", "goal_text", "goal_type",
+    "goal_id", "goal_key", "priority", "roi_raw", "roi", "goal_text", "goal_type",
     "criteria", "acceptance_level", "parameter_value", "achieved_value",
     "status", "evaluable", "structure_class",
 ]
@@ -260,6 +400,7 @@ def load_analysis_frame(engine: Engine) -> pd.DataFrame:
             Plan.planning_time_min,
             Plan.is_straight_pass,
             Plan.source_filename,
+            GoalResult.id.label("goal_id"),
             GoalResult.goal_key,
             GoalResult.priority,
             GoalResult.roi_raw,

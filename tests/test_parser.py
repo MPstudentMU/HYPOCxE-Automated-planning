@@ -152,13 +152,19 @@ def test_hn_not_entered_and_no_filename_hn_raises():
 # --------------------------------------------------------------------------- #
 
 
-def test_priority_sentinel_rows_excluded():
+def test_priority_sentinel_rows_kept_but_marked_no_priority():
+    """The sentinel row is kept (not dropped) with Priority normalized to
+    NaN/None — engine/corrections.py needs it in goal_results to be
+    reviewable; scoring/pass-rate exclude it by filtering on Priority being
+    set, not by the parser having thrown it away."""
     warnings: list[str] = []
     df = P.parse_workbook("1clinical_goals_90000001_Manual.xlsx",
                           _fixture_bytes("1clinical_goals_90000001_Manual.xlsx"),
                           form_pt_no=None, warnings=warnings)
     assert (df["Priority"] == P.NO_PRIORITY_SENTINEL).sum() == 0
-    assert "Rectum" not in " ".join(df["ROI"])  # the sentinel row's ROI (Rectum_new) is gone
+    sentinel_rows = df[df["ROI"] == "Rectum_new"]
+    assert len(sentinel_rows) == 1
+    assert pd.isna(sentinel_rows["Priority"].iloc[0])
     assert any("no protocol priority" in w for w in warnings)
 
 

@@ -14,6 +14,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from components.db import get_engine
+from components.pending_banner import render_pending_banner
 from engine.priority_filter import (
     PLAN_ORDER,
     PrioritySelection,
@@ -165,6 +167,8 @@ def _fmt(v, nd=1):
 # Page
 # --------------------------------------------------------------------------- #
 st.title("Module 4 · Plan Quality Score")
+
+render_pending_banner(get_engine())
 
 settings_key = str(st.session_state.get("analysis_settings", "default"))
 goal_scores = load_goal_scores(settings_key)

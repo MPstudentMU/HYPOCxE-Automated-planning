@@ -461,15 +461,19 @@ def _finalize_goals(df: pd.DataFrame, warnings: list[str], *, source_label: str)
     if len(df) < before:
         warnings.append(f"{source_label}: removed {before - len(df)} exact duplicate row(s)")
 
+    # A missing/sentinel priority is a data-quality problem, not a reason to
+    # discard the row: engine/corrections.py needs it in goal_results so it
+    # can be reviewed and assigned a real priority (Module 8 / New Case
+    # preview). Normalize the sentinel to a genuine missing value (None) and
+    # keep the row; scoring/pass-rate exclude it by filtering on Priority
+    # being set, not by it having been dropped here.
     no_priority = df["Priority"].isna() | (df["Priority"] == NO_PRIORITY_SENTINEL)
     n_no_priority = int(no_priority.sum())
     if n_no_priority:
         warnings.append(f"{source_label}: {n_no_priority} goal(s) have no protocol priority "
-                        "(RayStation sentinel 2147483647) — excluded from scoring")
-    df = df[~no_priority].reset_index(drop=True)
-    if df.empty:
-        return df
-    df["Priority"] = df["Priority"].astype(int)
+                        "(RayStation sentinel 2147483647) — kept, excluded from scoring until "
+                        "a priority is entered (see engine/corrections.py)")
+    df["Priority"] = df["Priority"].where(~no_priority, np.nan)
 
     df["roi_raw"] = df["ROI"]
     df["roi"] = df["ROI"].map(canonical_roi)
@@ -639,7 +643,7 @@ def parse_case_files(files: Sequence[FileInput], form: FormInput) -> ParsedCase:
         goals = [
             GoalRow(
                 goal_key=row.goal_key,
-                priority=int(row.Priority),
+                priority=None if pd.isna(row.Priority) else int(row.Priority),
                 roi_raw=row.roi_raw,
                 roi=row.roi,
                 goal_text=row.Goal,

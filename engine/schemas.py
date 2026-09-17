@@ -53,6 +53,28 @@ class StructureClass(str, Enum):
     OAR = "OAR"
 
 
+class CorrectionField(str, Enum):
+    """Which field of a goal_results row a goal_corrections row overrides."""
+    ACHIEVED_VALUE = "AchievedValue"
+    PRIORITY = "Priority"
+
+
+class CorrectionStatus(str, Enum):
+    """CORRECTED: a value was supplied. CONFIRMED_NOT_EVALUABLE: someone
+    looked and confirmed the goal genuinely cannot be evaluated for this
+    plan — valid only for CorrectionField.ACHIEVED_VALUE; a missing
+    Priority always needs an actual value, never this."""
+    CORRECTED = "corrected"
+    CONFIRMED_NOT_EVALUABLE = "confirmed_not_evaluable"
+
+
+class CorrectionSource(str, Enum):
+    RAYSTATION_DVH = "RayStation DVH"
+    PLAN_REPORT = "Plan report"
+    PROTOCOL = "Protocol"
+    OTHER = "Other"
+
+
 # Priority levels a goal template can carry. Kept local (rather than imported
 # from engine/priority_filter.py) so this low-level schema module has no
 # dependency on the analysis layer; must stay in sync with
@@ -130,7 +152,7 @@ class GoalRow(BaseModel):
     model_config = ConfigDict(use_enum_values=False)
 
     goal_key: str = Field(min_length=1)
-    priority: int
+    priority: Optional[int] = None
     roi_raw: str = Field(min_length=1)
     roi: str = Field(min_length=1)
     goal_text: str = Field(min_length=1)
@@ -145,9 +167,13 @@ class GoalRow(BaseModel):
 
     @model_validator(mode="after")
     def _check_priority(self) -> "GoalRow":
-        if self.priority not in VALID_PRIORITIES:
+        # None means "not yet known" (RayStation's no-priority sentinel, or
+        # a still-pending manual correction) — kept so it can be reviewed
+        # (engine/corrections.py), not rejected outright. A *given* value
+        # still has to be a real priority level.
+        if self.priority is not None and self.priority not in VALID_PRIORITIES:
             raise ValueError(
-                f"priority must be one of {VALID_PRIORITIES}, got {self.priority!r}"
+                f"priority must be one of {VALID_PRIORITIES} or None, got {self.priority!r}"
             )
         return self
 
