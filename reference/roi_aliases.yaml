@@ -1,0 +1,11 @@
+# ROI alias map
+#
+# Maps the many spellings an ROI can carry in exported plans to one canonical
+# structure name used throughout the engine.
+#
+#   <canonical name>:
+#     - <alias as it appears in exports>
+#
+# Not yet populated.
+
+aliases: {}

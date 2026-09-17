@@ -1,0 +1,10 @@
+streamlit
+pandas
+pydantic>=2
+sqlmodel
+plotly
+scipy
+openpyxl
+kaleido
+pyyaml
+pytest

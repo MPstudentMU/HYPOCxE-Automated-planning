@@ -1,0 +1,5 @@
+"""Handling of missing values.
+
+Not yet implemented — see CLAUDE.md before adding anything here.
+"""
+from __future__ import annotations
